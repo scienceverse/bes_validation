@@ -1,0 +1,5 @@
+"variable_name","label","values","missing_values","question"
+"article_id","This project's identifier of the paper","","empty cell or NA",""
+"platform_missed","Platform on which metacheck did not find the code","GitHub; Zenodo","empty cell or NA",""
+"category","Category of the reason","github_listed_no_code; github_pages_site; named_not_retrieved; paper_names_one_platform; zenodo_author_year_only; zenodo_badge_link","empty cell or NA",""
+"comment","Reviewer's comment","","empty cell or NA",""

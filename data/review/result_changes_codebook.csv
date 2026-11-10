@@ -1,0 +1,6 @@
+"variable_name","label","values","missing_values","question"
+"article_id","This project's identifier of the paper","","empty cell or NA",""
+"column","Column compared with Cooper et al. that changed","any_readme; code_archive; code_archived; code_download; data_archive; data_availability; data_download; data_license","empty cell or NA",""
+"earlier_value","Metacheck's value in the earlier repository's results of 2026-10-18","Dryad; Dryad;Zenodo; FALSE; Figshare;GitHub, GitLab, Codeberg or similar platform;Zenodo; GitHub, GitLab, Codeberg or similar platform; GitHub, GitLab, Codeberg or similar platform;OSF;Zenodo; GitHub, GitLab, Codeberg or similar platform;Zenodo; TRUE; Zenodo","empty cell or NA",""
+"final_value","Metacheck's value in the final results","","empty cell or NA",""
+"cause","Cause of the change, described in result_change_causes_data.csv","ADDRESS_PUNCTUATION; COMPRESSED_TAR_UNPACKED; DATAONE_IDENTIFIERS; DRYAD_SHARING_LINK; DSPACE_LOOKUP; DUPLICATE_OF_OSF_LISTING; FILE_TYPE_TABLE; NOT_DOWNLOADED_ON_PURPOSE; NOW_DOWNLOADED; OSF_LICENSE; OSF_LISTING; ROOT_R_PACKAGE_KEPT","empty cell or NA",""

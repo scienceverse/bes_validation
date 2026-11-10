@@ -1,0 +1,853 @@
+{
+  "@context": "https://w3id.org/ro/crate/1.1/context",
+  "@graph": [
+    {
+      "@id": "ro-crate-metadata.json",
+      "@type": "CreativeWork",
+      "conformsTo": {
+        "@id": "https://w3id.org/ro/crate/1.1"
+      },
+      "about": {
+        "@id": "./"
+      }
+    },
+    {
+      "@id": "./",
+      "@type": "Dataset",
+      "name": "Validating Metacheck against the BES data and code archiving corpus",
+      "description": "Results of running metacheck on 1861 papers from British Ecological Society journals, the comparison with the coding by Cooper et al., and the code that creates the manuscript from them.",
+      "author": [
+        {
+          "@id": "https://orcid.org/0000-0002-8393-5316"
+        }
+      ],
+      "hasPart": [
+        {
+          "@id": ".gitignore"
+        },
+        {
+          "@id": ".Rhistory"
+        },
+        {
+          "@id": "_quarto.yml"
+        },
+        {
+          "@id": "_targets.R"
+        },
+        {
+          "@id": "bes_validation.Rproj"
+        },
+        {
+          "@id": "code/build_documentation.R"
+        },
+        {
+          "@id": "code/compare_earlier_results.R"
+        },
+        {
+          "@id": "code/match_reported_results.R"
+        },
+        {
+          "@id": "code/modules/oddpub.R"
+        },
+        {
+          "@id": "code/R/audit_staleness.R"
+        },
+        {
+          "@id": "code/R/comment_quality_correlation.R"
+        },
+        {
+          "@id": "code/R/comparison_data.R"
+        },
+        {
+          "@id": "code/R/comparison_statistics.R"
+        },
+        {
+          "@id": "code/R/cooper_data.R"
+        },
+        {
+          "@id": "code/R/data_archive_uncoded_papers.R"
+        },
+        {
+          "@id": "code/R/disagreement_cause_categories.R"
+        },
+        {
+          "@id": "code/R/disagreement_worklist.R"
+        },
+        {
+          "@id": "code/R/free_extras_summary.R"
+        },
+        {
+          "@id": "code/R/helpers.R"
+        },
+        {
+          "@id": "code/R/master_comparison.R"
+        },
+        {
+          "@id": "code/R/metacheck_results.R"
+        },
+        {
+          "@id": "code/R/platforms.R"
+        },
+        {
+          "@id": "code/R/result_changes.R"
+        },
+        {
+          "@id": "code/R/slim_extraction.R"
+        },
+        {
+          "@id": "code/R/third_party_repositories.R"
+        },
+        {
+          "@id": "code/run_metacheck.R"
+        },
+        {
+          "@id": "data/cooper_coded_codebook.csv"
+        },
+        {
+          "@id": "data/cooper_coded_data.csv"
+        },
+        {
+          "@id": "data/match_reported_results.rds"
+        },
+        {
+          "@id": "data/metacheck_results.rds"
+        },
+        {
+          "@id": "data/metacheck_results_codebook.csv"
+        },
+        {
+          "@id": "data/papers_codebook.csv"
+        },
+        {
+          "@id": "data/papers_data.csv"
+        },
+        {
+          "@id": "data/review/code_archive_github_zenodo_review_codebook.csv"
+        },
+        {
+          "@id": "data/review/code_archive_github_zenodo_review_data.csv"
+        },
+        {
+          "@id": "data/review/data_archive_no_shared_platform_review_codebook.csv"
+        },
+        {
+          "@id": "data/review/data_archive_no_shared_platform_review_data.csv"
+        },
+        {
+          "@id": "data/review/disagreement_review_codebook.csv"
+        },
+        {
+          "@id": "data/review/disagreement_review_data.xlsx"
+        },
+        {
+          "@id": "data/review/github_repository_ownership_review_codebook.csv"
+        },
+        {
+          "@id": "data/review/github_repository_ownership_review_data.csv"
+        },
+        {
+          "@id": "data/review/manual_fair_api_findability_audit_codebook.csv"
+        },
+        {
+          "@id": "data/review/manual_fair_api_findability_audit_data.csv"
+        },
+        {
+          "@id": "data/review/manual_repo_findability_audit_codebook.csv"
+        },
+        {
+          "@id": "data/review/manual_repo_findability_audit_data.csv"
+        },
+        {
+          "@id": "data/review/repo_not_detected_categorization_codebook.csv"
+        },
+        {
+          "@id": "data/review/repo_not_detected_categorization_data.csv"
+        },
+        {
+          "@id": "data/review/result_change_causes_codebook.csv"
+        },
+        {
+          "@id": "data/review/result_change_causes_data.csv"
+        },
+        {
+          "@id": "data/review/result_change_other_columns_codebook.csv"
+        },
+        {
+          "@id": "data/review/result_change_other_columns_data.csv"
+        },
+        {
+          "@id": "data/review/result_change_percentages_codebook.csv"
+        },
+        {
+          "@id": "data/review/result_change_percentages_data.csv"
+        },
+        {
+          "@id": "data/review/result_changes_codebook.csv"
+        },
+        {
+          "@id": "data/review/result_changes_data.csv"
+        },
+        {
+          "@id": "documentation/apa.csl"
+        },
+        {
+          "@id": "documentation/appendix.pdf"
+        },
+        {
+          "@id": "documentation/appendix.qmd"
+        },
+        {
+          "@id": "documentation/cooper_supplement_documentation.pdf"
+        },
+        {
+          "@id": "documentation/manuscript.pdf"
+        },
+        {
+          "@id": "documentation/manuscript.qmd"
+        },
+        {
+          "@id": "documentation/manuscript_verification.pdf"
+        },
+        {
+          "@id": "documentation/manuscript_verification.qmd"
+        },
+        {
+          "@id": "documentation/package_citations.bib"
+        },
+        {
+          "@id": "documentation/references.bib"
+        },
+        {
+          "@id": "documentation/rerun_paper_ids_documentation.txt"
+        },
+        {
+          "@id": "documentation/session_info_documentation.txt"
+        },
+        {
+          "@id": "README.md"
+        },
+        {
+          "@id": "renv.lock"
+        },
+        {
+          "@id": "tests/testthat.R"
+        },
+        {
+          "@id": "tests/testthat/helper-load.R"
+        },
+        {
+          "@id": "tests/testthat/test-cause-categories.R"
+        },
+        {
+          "@id": "tests/testthat/test-comparison-statistics.R"
+        },
+        {
+          "@id": "tests/testthat/test-cooper-data.R"
+        },
+        {
+          "@id": "tests/testthat/test-corpus-results.R"
+        },
+        {
+          "@id": "tests/testthat/test-free-extras-and-comments.R"
+        },
+        {
+          "@id": "tests/testthat/test-manuscript-calculations.R"
+        },
+        {
+          "@id": "tests/testthat/test-manuscript-text.R"
+        },
+        {
+          "@id": "tests/testthat/test-recreate-columns.R"
+        },
+        {
+          "@id": "tests/testthat/test-reproducibility-appendix.R"
+        },
+        {
+          "@id": "tests/testthat/test-result-changes.R"
+        },
+        {
+          "@id": "tests/testthat/test-worklist.R"
+        }
+      ]
+    },
+    {
+      "@id": "https://orcid.org/0000-0002-8393-5316",
+      "@type": "Person",
+      "name": "Daniel Lakens"
+    },
+    {
+      "@id": ".gitignore",
+      "@type": "File",
+      "name": ".gitignore",
+      "description": "File that applies to the whole repository",
+      "contentSize": "242"
+    },
+    {
+      "@id": ".Rhistory",
+      "@type": "File",
+      "name": ".Rhistory",
+      "description": "File that applies to the whole repository",
+      "contentSize": "0"
+    },
+    {
+      "@id": "_quarto.yml",
+      "@type": "File",
+      "name": "_quarto.yml",
+      "description": "File that applies to the whole repository",
+      "contentSize": "48"
+    },
+    {
+      "@id": "_targets.R",
+      "@type": "File",
+      "name": "_targets.R",
+      "description": "File that applies to the whole repository",
+      "contentSize": "8980"
+    },
+    {
+      "@id": "bes_validation.Rproj",
+      "@type": "File",
+      "name": "bes_validation.Rproj",
+      "description": "File that applies to the whole repository",
+      "contentSize": "218"
+    },
+    {
+      "@id": "code/build_documentation.R",
+      "@type": "File",
+      "name": "build_documentation.R",
+      "description": "Code",
+      "contentSize": "16620"
+    },
+    {
+      "@id": "code/compare_earlier_results.R",
+      "@type": "File",
+      "name": "compare_earlier_results.R",
+      "description": "Code",
+      "contentSize": "10280"
+    },
+    {
+      "@id": "code/match_reported_results.R",
+      "@type": "File",
+      "name": "match_reported_results.R",
+      "description": "Code",
+      "contentSize": "2241"
+    },
+    {
+      "@id": "code/modules/oddpub.R",
+      "@type": "File",
+      "name": "oddpub.R",
+      "description": "Code",
+      "contentSize": "7016"
+    },
+    {
+      "@id": "code/R/audit_staleness.R",
+      "@type": "File",
+      "name": "audit_staleness.R",
+      "description": "Code",
+      "contentSize": "2885"
+    },
+    {
+      "@id": "code/R/comment_quality_correlation.R",
+      "@type": "File",
+      "name": "comment_quality_correlation.R",
+      "description": "Code",
+      "contentSize": "3579"
+    },
+    {
+      "@id": "code/R/comparison_data.R",
+      "@type": "File",
+      "name": "comparison_data.R",
+      "description": "Code",
+      "contentSize": "11603"
+    },
+    {
+      "@id": "code/R/comparison_statistics.R",
+      "@type": "File",
+      "name": "comparison_statistics.R",
+      "description": "Code",
+      "contentSize": "8051"
+    },
+    {
+      "@id": "code/R/cooper_data.R",
+      "@type": "File",
+      "name": "cooper_data.R",
+      "description": "Code",
+      "contentSize": "1986"
+    },
+    {
+      "@id": "code/R/data_archive_uncoded_papers.R",
+      "@type": "File",
+      "name": "data_archive_uncoded_papers.R",
+      "description": "Code",
+      "contentSize": "7008"
+    },
+    {
+      "@id": "code/R/disagreement_cause_categories.R",
+      "@type": "File",
+      "name": "disagreement_cause_categories.R",
+      "description": "Code",
+      "contentSize": "6323"
+    },
+    {
+      "@id": "code/R/disagreement_worklist.R",
+      "@type": "File",
+      "name": "disagreement_worklist.R",
+      "description": "Code",
+      "contentSize": "16394"
+    },
+    {
+      "@id": "code/R/free_extras_summary.R",
+      "@type": "File",
+      "name": "free_extras_summary.R",
+      "description": "Code",
+      "contentSize": "6029"
+    },
+    {
+      "@id": "code/R/helpers.R",
+      "@type": "File",
+      "name": "helpers.R",
+      "description": "Code",
+      "contentSize": "1423"
+    },
+    {
+      "@id": "code/R/master_comparison.R",
+      "@type": "File",
+      "name": "master_comparison.R",
+      "description": "Code",
+      "contentSize": "3988"
+    },
+    {
+      "@id": "code/R/metacheck_results.R",
+      "@type": "File",
+      "name": "metacheck_results.R",
+      "description": "Code",
+      "contentSize": "5170"
+    },
+    {
+      "@id": "code/R/platforms.R",
+      "@type": "File",
+      "name": "platforms.R",
+      "description": "Code",
+      "contentSize": "7419"
+    },
+    {
+      "@id": "code/R/result_changes.R",
+      "@type": "File",
+      "name": "result_changes.R",
+      "description": "Code",
+      "contentSize": "4642"
+    },
+    {
+      "@id": "code/R/slim_extraction.R",
+      "@type": "File",
+      "name": "slim_extraction.R",
+      "description": "Code",
+      "contentSize": "581"
+    },
+    {
+      "@id": "code/R/third_party_repositories.R",
+      "@type": "File",
+      "name": "third_party_repositories.R",
+      "description": "Code",
+      "contentSize": "6280"
+    },
+    {
+      "@id": "code/run_metacheck.R",
+      "@type": "File",
+      "name": "run_metacheck.R",
+      "description": "Code",
+      "contentSize": "21827"
+    },
+    {
+      "@id": "data/cooper_coded_codebook.csv",
+      "@type": "File",
+      "name": "cooper_coded_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "5776"
+    },
+    {
+      "@id": "data/cooper_coded_data.csv",
+      "@type": "File",
+      "name": "cooper_coded_data.csv",
+      "description": "Data",
+      "contentSize": "1092149"
+    },
+    {
+      "@id": "data/match_reported_results.rds",
+      "@type": "File",
+      "name": "match_reported_results.rds",
+      "description": "Data",
+      "contentSize": "14550"
+    },
+    {
+      "@id": "data/metacheck_results.rds",
+      "@type": "File",
+      "name": "metacheck_results.rds",
+      "description": "Data",
+      "contentSize": "64607652"
+    },
+    {
+      "@id": "data/metacheck_results_codebook.csv",
+      "@type": "File",
+      "name": "metacheck_results_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "119901"
+    },
+    {
+      "@id": "data/papers_codebook.csv",
+      "@type": "File",
+      "name": "papers_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "839"
+    },
+    {
+      "@id": "data/papers_data.csv",
+      "@type": "File",
+      "name": "papers_data.csv",
+      "description": "Data",
+      "contentSize": "200025"
+    },
+    {
+      "@id": "data/review/code_archive_github_zenodo_review_codebook.csv",
+      "@type": "File",
+      "name": "code_archive_github_zenodo_review_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "502"
+    },
+    {
+      "@id": "data/review/code_archive_github_zenodo_review_data.csv",
+      "@type": "File",
+      "name": "code_archive_github_zenodo_review_data.csv",
+      "description": "Review by hand of metacheck's output",
+      "contentSize": "8201"
+    },
+    {
+      "@id": "data/review/data_archive_no_shared_platform_review_codebook.csv",
+      "@type": "File",
+      "name": "data_archive_no_shared_platform_review_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "1329"
+    },
+    {
+      "@id": "data/review/data_archive_no_shared_platform_review_data.csv",
+      "@type": "File",
+      "name": "data_archive_no_shared_platform_review_data.csv",
+      "description": "Review by hand of metacheck's output",
+      "contentSize": "13243"
+    },
+    {
+      "@id": "data/review/disagreement_review_codebook.csv",
+      "@type": "File",
+      "name": "disagreement_review_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "17608"
+    },
+    {
+      "@id": "data/review/disagreement_review_data.xlsx",
+      "@type": "File",
+      "name": "disagreement_review_data.xlsx",
+      "description": "Review by hand of metacheck's output",
+      "contentSize": "292260"
+    },
+    {
+      "@id": "data/review/github_repository_ownership_review_codebook.csv",
+      "@type": "File",
+      "name": "github_repository_ownership_review_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "1173"
+    },
+    {
+      "@id": "data/review/github_repository_ownership_review_data.csv",
+      "@type": "File",
+      "name": "github_repository_ownership_review_data.csv",
+      "description": "Review by hand of metacheck's output",
+      "contentSize": "68407"
+    },
+    {
+      "@id": "data/review/manual_fair_api_findability_audit_codebook.csv",
+      "@type": "File",
+      "name": "manual_fair_api_findability_audit_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "1401"
+    },
+    {
+      "@id": "data/review/manual_fair_api_findability_audit_data.csv",
+      "@type": "File",
+      "name": "manual_fair_api_findability_audit_data.csv",
+      "description": "Review by hand of metacheck's output",
+      "contentSize": "338641"
+    },
+    {
+      "@id": "data/review/manual_repo_findability_audit_codebook.csv",
+      "@type": "File",
+      "name": "manual_repo_findability_audit_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "1304"
+    },
+    {
+      "@id": "data/review/manual_repo_findability_audit_data.csv",
+      "@type": "File",
+      "name": "manual_repo_findability_audit_data.csv",
+      "description": "Review by hand of metacheck's output",
+      "contentSize": "744047"
+    },
+    {
+      "@id": "data/review/repo_not_detected_categorization_codebook.csv",
+      "@type": "File",
+      "name": "repo_not_detected_categorization_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "435"
+    },
+    {
+      "@id": "data/review/repo_not_detected_categorization_data.csv",
+      "@type": "File",
+      "name": "repo_not_detected_categorization_data.csv",
+      "description": "Review by hand of metacheck's output",
+      "contentSize": "116625"
+    },
+    {
+      "@id": "data/review/result_change_causes_codebook.csv",
+      "@type": "File",
+      "name": "result_change_causes_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "4281"
+    },
+    {
+      "@id": "data/review/result_change_causes_data.csv",
+      "@type": "File",
+      "name": "result_change_causes_data.csv",
+      "description": "Review by hand of metacheck's output",
+      "contentSize": "4063"
+    },
+    {
+      "@id": "data/review/result_change_other_columns_codebook.csv",
+      "@type": "File",
+      "name": "result_change_other_columns_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "1301"
+    },
+    {
+      "@id": "data/review/result_change_other_columns_data.csv",
+      "@type": "File",
+      "name": "result_change_other_columns_data.csv",
+      "description": "Review by hand of metacheck's output",
+      "contentSize": "1127"
+    },
+    {
+      "@id": "data/review/result_change_percentages_codebook.csv",
+      "@type": "File",
+      "name": "result_change_percentages_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "650"
+    },
+    {
+      "@id": "data/review/result_change_percentages_data.csv",
+      "@type": "File",
+      "name": "result_change_percentages_data.csv",
+      "description": "Review by hand of metacheck's output",
+      "contentSize": "360"
+    },
+    {
+      "@id": "data/review/result_changes_codebook.csv",
+      "@type": "File",
+      "name": "result_changes_codebook.csv",
+      "description": "Codebook of the data file with the same name",
+      "contentSize": "1127"
+    },
+    {
+      "@id": "data/review/result_changes_data.csv",
+      "@type": "File",
+      "name": "result_changes_data.csv",
+      "description": "Review by hand of metacheck's output",
+      "contentSize": "5808"
+    },
+    {
+      "@id": "documentation/apa.csl",
+      "@type": "File",
+      "name": "apa.csl",
+      "description": "Documentation",
+      "contentSize": "84608"
+    },
+    {
+      "@id": "documentation/appendix.pdf",
+      "@type": "File",
+      "name": "appendix.pdf",
+      "description": "Documentation",
+      "contentSize": "402371"
+    },
+    {
+      "@id": "documentation/appendix.qmd",
+      "@type": "File",
+      "name": "appendix.qmd",
+      "description": "Documentation",
+      "contentSize": "155141"
+    },
+    {
+      "@id": "documentation/cooper_supplement_documentation.pdf",
+      "@type": "File",
+      "name": "cooper_supplement_documentation.pdf",
+      "description": "Documentation",
+      "contentSize": "342317"
+    },
+    {
+      "@id": "documentation/manuscript.pdf",
+      "@type": "File",
+      "name": "manuscript.pdf",
+      "description": "Documentation",
+      "contentSize": "212820"
+    },
+    {
+      "@id": "documentation/manuscript.qmd",
+      "@type": "File",
+      "name": "manuscript.qmd",
+      "description": "Documentation",
+      "contentSize": "169623"
+    },
+    {
+      "@id": "documentation/manuscript_verification.pdf",
+      "@type": "File",
+      "name": "manuscript_verification.pdf",
+      "description": "Documentation",
+      "contentSize": "241865"
+    },
+    {
+      "@id": "documentation/manuscript_verification.qmd",
+      "@type": "File",
+      "name": "manuscript_verification.qmd",
+      "description": "Documentation",
+      "contentSize": "151120"
+    },
+    {
+      "@id": "documentation/package_citations.bib",
+      "@type": "File",
+      "name": "package_citations.bib",
+      "description": "Documentation",
+      "contentSize": "2202"
+    },
+    {
+      "@id": "documentation/references.bib",
+      "@type": "File",
+      "name": "references.bib",
+      "description": "Documentation",
+      "contentSize": "9108"
+    },
+    {
+      "@id": "documentation/rerun_paper_ids_documentation.txt",
+      "@type": "File",
+      "name": "rerun_paper_ids_documentation.txt",
+      "description": "Documentation",
+      "contentSize": "535"
+    },
+    {
+      "@id": "documentation/session_info_documentation.txt",
+      "@type": "File",
+      "name": "session_info_documentation.txt",
+      "description": "Documentation",
+      "contentSize": "4960"
+    },
+    {
+      "@id": "README.md",
+      "@type": "File",
+      "name": "README.md",
+      "description": "File that applies to the whole repository",
+      "contentSize": "5956"
+    },
+    {
+      "@id": "renv.lock",
+      "@type": "File",
+      "name": "renv.lock",
+      "description": "File that applies to the whole repository",
+      "contentSize": "315640"
+    },
+    {
+      "@id": "tests/testthat.R",
+      "@type": "File",
+      "name": "testthat.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "354"
+    },
+    {
+      "@id": "tests/testthat/helper-load.R",
+      "@type": "File",
+      "name": "helper-load.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "3612"
+    },
+    {
+      "@id": "tests/testthat/test-cause-categories.R",
+      "@type": "File",
+      "name": "test-cause-categories.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "2871"
+    },
+    {
+      "@id": "tests/testthat/test-comparison-statistics.R",
+      "@type": "File",
+      "name": "test-comparison-statistics.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "5444"
+    },
+    {
+      "@id": "tests/testthat/test-cooper-data.R",
+      "@type": "File",
+      "name": "test-cooper-data.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "3197"
+    },
+    {
+      "@id": "tests/testthat/test-corpus-results.R",
+      "@type": "File",
+      "name": "test-corpus-results.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "3207"
+    },
+    {
+      "@id": "tests/testthat/test-free-extras-and-comments.R",
+      "@type": "File",
+      "name": "test-free-extras-and-comments.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "4939"
+    },
+    {
+      "@id": "tests/testthat/test-manuscript-calculations.R",
+      "@type": "File",
+      "name": "test-manuscript-calculations.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "5433"
+    },
+    {
+      "@id": "tests/testthat/test-manuscript-text.R",
+      "@type": "File",
+      "name": "test-manuscript-text.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "3495"
+    },
+    {
+      "@id": "tests/testthat/test-recreate-columns.R",
+      "@type": "File",
+      "name": "test-recreate-columns.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "7438"
+    },
+    {
+      "@id": "tests/testthat/test-reproducibility-appendix.R",
+      "@type": "File",
+      "name": "test-reproducibility-appendix.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "3692"
+    },
+    {
+      "@id": "tests/testthat/test-result-changes.R",
+      "@type": "File",
+      "name": "test-result-changes.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "3038"
+    },
+    {
+      "@id": "tests/testthat/test-worklist.R",
+      "@type": "File",
+      "name": "test-worklist.R",
+      "description": "Code: tests of the pipeline",
+      "contentSize": "5222"
+    }
+  ]
+}

@@ -1,0 +1,1369 @@
+---
+title: "Verification of the Manuscript's Numbers and Factual Statements"
+format:
+  pdf:
+    toc: true
+    include-in-header:
+      # Long file names in code font may break after an underscore, so they stay inside the margin.
+      text: |
+        \DeclareRobustCommand{\_}{\textunderscore\allowbreak}
+execute:
+  echo: false
+  warning: false
+  message: false
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+#| label: manuscript-objects
+#| include: false
+
+library(targets)
+library(metacheck)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(flextable)
+tar_source("code/R")
+
+# Runs the chunks of manuscript.qmd that compute numbers, so that every value below is the
+# value the manuscript prints.
+manuscript <- readLines("documentation/manuscript.qmd", warn = FALSE, encoding = "UTF-8")
+fences <- grep("^```", manuscript)
+ms <- new.env(parent = globalenv())
+for (label in c("data", "license-value-check", "data-code-archiving-counts", "full-317-audit-load",
+                "file-extension-counts", "readme-counts", "reproducibility-counts",
+                "code-annotation-counts")) {
+  from <- grep(paste0("^#\\| *label: *", label, " *$"), manuscript)
+  to <- fences[fences > from][1]
+  eval(parse(text = manuscript[(from + 1):(to - 1)], encoding = "UTF-8"), envir = ms)
+}
+```
+
+```{r}
+#| label: independent-recomputation
+#| include: false
+
+# Independent recomputation. Reads the raw files with its own code, and joins Cooper et
+# al.'s rows on paper_number rather than on the corrected DOI. Two things are shared with
+# the pipeline on purpose, because a copy would repeat the same rule: repo_url_platform()
+# and is_institutional_figshare() label platforms, and the patterns that sort review
+# comments are those of categorize_disagreement_causes().
+ind <- new.env(parent = globalenv())
+local({
+  raw <- readRDS("data/metacheck_results.rds")
+  cod <- read.csv("data/cooper_coded_data.csv")
+  pap <- read.csv("data/papers_data.csv", colClasses = "character")
+  cod$id <- pap$article_id[match(as.character(cod$paper_number), pap$paper_number)]
+  stopifnot(!anyNA(cod$id), !anyDuplicated(cod$id))
+  ids <- cod$id
+  st <- raw$summary_table
+  rt <- raw$repo_check$table
+  sd <- raw$data_check$structure
+  ct <- raw$code_check$table
+  rm_ <- raw$repo_check$repo_metadata
+  source("code/R/platforms.R", local = TRUE)
+
+  master_comparison <- data.frame(article_id = ids, recorder_ID = cod$recorder_ID)
+  data_rows <- sd[sd$data_type %in% "data", ]
+  papers_with_data <- unique(data_rows$paper_id)
+  papers_with_code <- unique(ct$paper_id)
+
+  # Metacheck's answers, one value per paper in the order of ids.
+  mc_avail <- ids %in% st$paper_id[st$files_n %in% seq_len(1e7)]
+  has_license <- tapply(rm_$license, rm_$repo_url, function(v) any(!is.na(v)))
+  mc_lic <- rep(NA, length(ids))
+  for (i in which(ids %in% papers_with_data)) {
+    u <- unique(data_rows$repo_url[data_rows$paper_id == ids[i]])
+    mc_lic[i] <- any(has_license[u] %in% TRUE)
+  }
+  fetched <- data_rows[!is.na(data_rows$file_location) & nzchar(data_rows$file_location), ]
+  mc_dl <- rep(NA, length(ids))
+  for (i in which(ids %in% fetched$paper_id)) mc_dl[i] <- any(fetched$tabular_usable[fetched$paper_id == ids[i]] %in% TRUE)
+  mc_code <- ids %in% papers_with_code
+  mc_code_dl <- rep(NA, length(ids))
+  for (i in which(mc_code)) {
+    fl <- ct$file_location[ct$paper_id == ids[i]]
+    mc_code_dl[i] <- any(!is.na(fl) & nzchar(fl))
+  }
+  mc_readme <- ids %in% rt$paper_id[rt$doc_role %in% "readme"]
+  bool <- function(x, yes, no) ifelse(x %in% yes, TRUE, ifelse(x %in% no, FALSE, NA))
+  c_readme_d <- bool(cod$data_README, c("Yes", "Quasi-README"), "No")
+  c_readme_c <- bool(cod$code_README, c("Yes", "Quasi-README"), "No")
+  c_readme <- ifelse(c_readme_d %in% TRUE | c_readme_c %in% TRUE, TRUE,
+                     ifelse(is.na(c_readme_d) & is.na(c_readme_c), NA, FALSE))
+
+  conf <- function(cb, mb) {
+    ok <- !is.na(cb) & !is.na(mb); a <- cb[ok]; b <- mb[ok]
+    tp <- sum(a & b); fn <- sum(a & !b); fp <- sum(!a & b); tn <- sum(!a & !b)
+    mt <- suppressWarnings(mcnemar.test(matrix(c(tp, fn, fp, tn), 2)))
+    list(tp = tp, fn = fn, fp = fp, tn = tn, n_both_coded = sum(ok), n_agree = tp + tn, n_disagree = fn + fp,
+         pct_agree = 100 * (tp + tn) / sum(ok), sensitivity = tp / (tp + fn), specificity = tn / (tn + fp),
+         ppv = tp / (tp + fp), mcnemar_stat = unname(mt$statistic), mcnemar_df = unname(mt$parameter), mcnemar_p = mt$p.value)
+  }
+  results <- list(
+    data_availability = conf(bool(cod$data_availability, "Yes", c("No", "No, but they are available on request")), mc_avail),
+    data_license = conf(bool(cod$data_license, "Yes", "No"), mc_lic),
+    data_download = conf(bool(cod$data_download, c("Yes", "Yes, but not all data"), "No"), mc_dl),
+    code_archived = conf(bool(cod$code_archived, "Yes", "No"), mc_code),
+    code_download = conf(bool(cod$code_download, "Yes", "No"), mc_code_dl),
+    any_readme = conf(c_readme, mc_readme))
+
+  # Platform comparison, as sets, for a table of files and Cooper et al.'s column.
+  plat_cmp <- function(tab, coded) {
+    gh <- "github, gitlab, codeberg or similar platform"; oth <- "other repo/database"
+    one <- vector("list", length(ids)); cats <- rep(NA_character_, length(ids)); found <- rep(NA_character_, length(ids))
+    sets <- split(tab$repo_url[!is.na(tab$repo_url) & nzchar(tab$repo_url)], tab$paper_id[!is.na(tab$repo_url) & nzchar(tab$repo_url)])
+    for (i in seq_along(ids)) {
+      u <- unique(sets[[ids[i]]])
+      if (is.na(coded[i]) || !length(u)) next
+      a <- unique(tolower(trimws(strsplit(coded[i], ";")[[1]])))
+      a[a == "cran"] <- oth
+      a <- unique(setdiff(a, c("supplementary materials", "personal website")))
+      lab <- repo_url_platform(u)
+      b <- tolower(lab); b[b == "osf"] <- oth
+      fig <- u[lab == "Figshare"]
+      if (length(fig) && all(is_institutional_figshare(fig)) && "figshare" %in% b && !"figshare" %in% a && oth %in% a) b[b == "figshare"] <- oth
+      b <- unique(b)
+      if (!length(a)) next
+      cats[i] <- if (setequal(a, b)) "exact" else if (all(b %in% a)) "mc_fewer" else if (all(a %in% b)) "mc_more" else if (any(a %in% b)) "partial" else "none"
+      if (all(c(gh, "zenodo") %in% a)) found[i] <- if (all(c(gh, "zenodo") %in% b)) "both" else if (gh %in% b) "github_only" else if ("zenodo" %in% b) "zenodo_only" else "neither"
+      one[[i]] <- length(a)
+    }
+    k <- table(factor(cats, c("exact", "mc_fewer", "mc_more", "partial", "none")))
+    list(categories = k, category = cats, n_both_coded = sum(!is.na(cats)), n_agree = unname(k["exact"]),
+         pct_agree = 100 * unname(k["exact"]) / sum(!is.na(cats)), n_any_overlap = sum(cats != "none", na.rm = TRUE),
+         pct_any_overlap = 100 * mean(cats[!is.na(cats)] != "none"), n_cooper_multi = sum(unlist(one) > 1),
+         n_cooper_github_zenodo = sum(!is.na(found)), github_zenodo = table(factor(found, c("both", "github_only", "zenodo_only", "neither"))),
+         github_zenodo_found = found)
+  }
+  results$data_archive <- plat_cmp(data_rows, cod$data_archive)
+  results$code_archive <- plat_cmp(ct, cod$code_archive)
+
+  # The review file itself.
+  rv <- openxlsx::read.xlsx("data/review/disagreement_review_data.xlsx")
+  verdict_tallies <- lapply(setNames(nm = c("data_availability", "data_license", "data_download", "code_archived", "code_download", "any_readme")),
+                            function(k) table(rv[[paste0(k, "_verdict")]]))
+  cooper_right_causes <- categorize_disagreement_causes(rv)$cooper_right_causes
+  n_review <- nrow(rv)
+  vcols <- paste0(c("data_availability", "data_archive", "data_license", "data_download", "code_archived", "code_archive", "code_download", "any_readme"), "_verdict")
+  n_reviewed <- sum(rowSums(!is.na(rv[vcols])) > 0)
+  Review_status <- sprintf("All %d disagreeing papers carry a verdict for every column on which they disagree", n_review)
+  cause_of <- function(col) { cm <- rv[[paste0(col, "_comment")]]; ifelse(grepl("CAUSE: ", cm, fixed = TRUE), sub("^.*CAUSE: ([A-Z_]+).*$", "\\1", cm), NA) }
+  n_cause <- function(col, cause, verdict = c("COOPER_RIGHT", "METACHECK_RIGHT", "BOTH_DEFENSIBLE")) sum(cause_of(col) %in% cause & rv[[paste0(col, "_verdict")]] %in% verdict)
+  code_categories <- rv[!is.na(rv$code_category), c("code_category", "code_category_reason", "code_archived_verdict")]
+  n_code <- function(category) sum(code_categories$code_category == category)
+  n_code_reason <- function(text) sum(grepl(text, code_categories$code_category_reason, fixed = TRUE))
+  n_dl_right <- function(pattern) sum(rv$data_download_verdict %in% "COOPER_RIGHT" & grepl(pattern, rv$data_download_comment, perl = TRUE))
+  rv_readme <- c_readme[match(rv$article_id, ids)] %in% TRUE
+  n_readme <- function(cooper_yes, verdict) sum(rv_readme == cooper_yes & rv$any_readme_verdict %in% verdict)
+  n_readme_description <- sum(rv_readme & rv$any_readme_verdict %in% "DIFFERENT_DEFINITION" & grepl("landing page|description|abstract", rv$any_readme_comment, ignore.case = TRUE))
+  n_readme_in_archive <- sum(rv$any_readme_verdict %in% "COOPER_RIGHT" & grepl("README is inside|README sits inside|tar archive|\\.rar|\\.7z|ZIP64", rv$any_readme_comment))
+  un <- is.na(c_readme)
+  n_readme_uncoded <- sum(un)
+  n_readme_uncoded_unsure <- sum(un & (cod$data_README %in% "Unsure" | cod$code_README %in% "Unsure"))
+  n_readme_uncoded_archived <- sum(un & (cod$data_availability %in% "Yes" | cod$code_archived %in% "Yes"))
+
+  # Open data and code as judged from the text.
+  odd_d <- st$data_open.oddpub[match(ids, st$paper_id)]; odd_c <- st$code_open.oddpub[match(ids, st$paper_id)]
+  op_d <- st$data_open[match(ids, st$paper_id)]; op_c <- st$code_open[match(ids, st$paper_id)]
+  acc <- function(p, t) {
+    ok <- !is.na(p) & !is.na(t); p <- p[ok]; t <- t[ok]
+    list(n = sum(ok), n_negative = sum(!t), n_positive = sum(t),
+         n_agree = sum(p == t), n_disagree = sum(p != t),
+         # the tool judged open where the coder did not, and the reverse
+         n_tool_open_cooper_not = sum(p & !t), n_tool_not_cooper_open = sum(!p & t),
+         sensitivity = sum(p & t) / sum(t), specificity = sum(!p & !t) / sum(!t), accuracy = mean(p == t))
+  }
+  td <- bool(cod$data_open, c("Yes", "Yes, but not all files"), "No"); tc <- bool(cod$code_open, "Yes", "No")
+  accuracy_summary <- list(oddpub_data = acc(odd_d, td), oddpub_code = acc(odd_c, tc), metacheck_data = acc(op_d, td), metacheck_code = acc(op_c, tc))
+  bd <- is.na(cod$data_open) & cod$data_availability %in% "Yes"; ad <- cod$data_open %in% "Needs specific software or too large"
+  bc <- is.na(cod$code_open) & cod$code_archived %in% "Yes"; ac <- cod$code_open %in% "Maybe if I had the right software"
+  n_blank_data_open <- sum(bd); n_oddpub_open_blank_data <- sum(odd_d[bd]); n_mc_open_blank_data <- sum(op_d[bd])
+  n_ambig_data_open <- sum(ad); n_oddpub_open_ambig_data <- sum(odd_d[ad]); n_mc_open_ambig_data <- sum(op_d[ad])
+  n_blank_code_open <- sum(bc); n_oddpub_open_blank_code <- sum(odd_c[bc]); n_mc_open_blank_code <- sum(op_c[bc])
+  n_ambig_code_open <- sum(ac); n_oddpub_open_ambig_code <- sum(odd_c[ac]); n_mc_open_ambig_code <- sum(op_c[ac])
+
+  # Papers with data or code, for each side.
+  c_either <- ids[cod$data_availability %in% "Yes" | cod$code_archived %in% "Yes"]
+  m_either <- union(papers_with_data, papers_with_code)
+  n_cooper_data <- sum(cod$data_availability %in% "Yes"); n_cooper_code <- sum(cod$code_archived %in% "Yes"); n_cooper_either <- length(c_either)
+  n_mc_repo_found <- sum(mc_avail); n_mc_data <- length(papers_with_data); n_mc_code <- length(papers_with_code); n_mc_either <- length(m_either)
+  n_both_yes_either <- length(intersect(c_either, m_either)); n_cooper_yes_mc_no <- length(setdiff(c_either, m_either)); n_mc_yes_cooper_no <- length(setdiff(m_either, c_either))
+  n_either_total_disagree <- n_cooper_yes_mc_no + n_mc_yes_cooper_no
+
+  # Repositories Metacheck supports. The hosts of the Figshare family are the values of
+  # .figshare_doi_prefix_hosts(); its names are DOI prefixes, not hosts.
+  ns <- asNamespace("metacheck")
+  dv <- union(ns$.dataverse_hosts(), names(ns$.dataverse_doi_prefix_hosts())); d7 <- ns$.dspace7_hosts(); dl <- ns$.dspace_legacy_hosts()
+  dn <- vapply(ns$.dataone_hosts(), `[[`, "", "host"); fg <- union(ns$.figshare_vanity_hosts(), unlist(ns$.figshare_doi_prefix_hosts()))
+  n_dataverse_hosts <- length(dv); n_dspace7_hosts <- length(d7); n_dspace_legacy_hosts <- length(dl); n_dataone_hosts <- length(dn); n_figshare_hosts <- length(fg)
+  platforms <- c("researchdata4tu", "aspredicted", "dryad", "fsd", "github", "gitlab", "mendeley", "osf", "rbox", "reshare", "zenodo")
+  n_dedicated_platforms <- sum(vapply(platforms, function(p) any(grepl(paste0("^\\.?", p, "(_[a-z]+)?_(links|info|files)$"), ls(ns, all.names = TRUE))), TRUE))
+  n_unique_repos <- length(unique(c(dv, d7, dl, dn, fg))) + n_dedicated_platforms
+
+  # The audit of the papers Metacheck missed.
+  aud <- read.csv("data/review/manual_repo_findability_audit_data.csv"); fair <- read.csv("data/review/manual_fair_api_findability_audit_data.csv")
+  rc <- aud$root_cause_category; n_rc <- function(...) sum(rc %in% c(...))
+  n_no_repo_cited <- n_rc("NO_REPOSITORY_CITED"); n_nonfair_private_link <- n_rc("NOT_FAIR_PRIVATE_LINK"); n_nonfair_no_deposit <- n_rc("PLATFORM_URL_NOT_A_SINGLE_REPO")
+  n_nonfair_blocked <- n_rc("NOT_FAIR_BLOCKS_AUTOMATED_ACCESS"); n_not_live <- n_rc("REPO_NOT_ACTUALLY_LIVE_OR_ACCESSIBLE"); n_nonfair_no_api <- n_rc("NOT_FAIR_NO_DATA_API")
+  ff <- as.character(fair$fair_machine_findable_in_principle)
+  n_unsupported_not_fair <- sum(rc == "PLATFORM_NOT_SUPPORTED" & ff == "FALSE"); n_unsupported_but_fair <- sum(rc == "PLATFORM_NOT_SUPPORTED" & ff == "TRUE")
+  n_nonfair <- n_nonfair_private_link + n_nonfair_no_deposit + n_nonfair_blocked + n_not_live + n_nonfair_no_api + n_unsupported_not_fair
+  n_not_fair_format <- n_rc("DATA_OR_CODE_NOT_IN_FAIR_FORMAT"); n_not_classified <- n_not_fair_format + n_rc("CLASSIFIER_EXTENSION_GAP", "CLASSIFIER_MISTYPED")
+  n_lim_doi_garbled <- n_rc("EXTRACTION_GAP_DOI_GARBLED"); n_lim_text_missing <- n_rc("EXTRACTION_GAP_TEXT_MISSING"); n_lim_extraction <- n_lim_doi_garbled + n_lim_text_missing
+  n_lim_code <- n_rc("SUPPORTED_PLATFORM_BUG", "CLASSIFIER_ARCHIVE_NOT_EXPANDED", "FILES_NOT_ENUMERATED"); n_metacheck_limitation <- n_lim_extraction + n_lim_code
+  rl <- aud$doi_only_in_reference_list; n_lim_ref_only <- sum(!is.na(rl)); n_lim_ref_citation <- sum(rl %in% "data citation"); n_lim_ref_conversion <- sum(rl %in% "text conversion")
+  n_not_fair_total <- n_no_repo_cited + n_not_fair_format + n_nonfair; n_cooper_fair <- n_cooper_either - n_not_fair_total
+  pct_fair_found <- sprintf("%.1f%%", 100 * n_both_yes_either / n_cooper_fair)
+
+  # Platform section.
+  n_data_mc_more_github <- { k <- results$data_archive$category %in% "mc_more"; plat <- tapply(data_rows$repo_url, data_rows$paper_id, function(u) any(repo_url_platform(unique(u)) == "GitHub, GitLab, Codeberg or similar platform"))
+    sum(k & plat[ids] %in% TRUE & !grepl("GitHub", cod$data_archive, fixed = TRUE)) }
+  own <- read.csv("data/review/github_repository_ownership_review_data.csv"); third <- own[!own$owner_is_author, ]
+  is3 <- function(p, u) paste(p, u) %in% paste(third$article_id, third$repo_url)
+  tp <- list(n_github_repos = nrow(own), n_third_party_repos = nrow(third), n_third_party_papers = length(unique(third$article_id)),
+             n_corpus_papers = length(unique(third$article_id[grepl("text corpus", third$why_not_authors, fixed = TRUE)])))
+  cpapers <- unique(third$article_id)
+  k3 <- ct[ct$paper_id %in% cpapers, ]; only_code <- vapply(split(k3, k3$paper_id), function(d) all(is3(d$paper_id, d$repo_url)), TRUE)
+  only_code <- names(only_code)[only_code]; cc3 <- cod$code_archived[match(only_code, ids)]
+  tp$n_code_archived_only_third_party <- length(only_code)
+  tp$code_archived_only_third_party <- c(No = sum(cc3 %in% "No"), Yes = sum(cc3 %in% "Yes"))
+  f3 <- rt[rt$paper_id %in% cpapers, ]; only_any <- vapply(split(f3, f3$paper_id), function(d) all(is3(d$paper_id, d$repo_url)), TRUE); only_any <- names(only_any)[only_any]
+  da3 <- cod$data_availability[match(only_any, ids)]; tp$data_availability_only_third_party <- c(Yes = sum(da3 %in% "Yes"), No = sum(da3 %in% "No"))
+  without <- function(tab, coded, cats) {
+    keep <- tab[!is3(tab$paper_id, tab$repo_url), ]; c2 <- plat_cmp(keep, coded)$category; list(a = cats, b = c2)
+  }
+  dd <- without(data_rows, cod$data_archive, results$data_archive$category); cc_ <- without(ct, cod$code_archive, results$code_archive$category)
+  tp$n_data_archive_mc_more_to_exact <- sum(ids %in% cpapers & dd$a %in% "mc_more" & dd$b %in% "exact")
+  tp$n_code_archive_mc_more_to_exact <- sum(ids %in% cpapers & cc_$a %in% "mc_more" & cc_$b %in% "exact")
+  tp$n_code_archive_exact_only_third_party <- sum(ids %in% cpapers & cc_$a %in% "exact" & is.na(cc_$b))
+
+  none_review <- read.csv("data/review/data_archive_no_shared_platform_review_data.csv"); gz_review <- read.csv("data/review/code_archive_github_zenodo_review_data.csv")
+  none_n <- function(group) sum(none_review$group %in% group)
+  nm <- none_review[!is.na(none_review$missed_cause), ]; nc <- function(cs, f = NULL) sum(nm$missed_cause %in% cs & (is.null(f) | as.character(nm$fair_machine_findable_in_principle) %in% f))
+  none_not_fair <- nc("DATA_OR_CODE_NOT_IN_FAIR_FORMAT") + nc("PLATFORM_NOT_SUPPORTED", "FALSE"); none_unsupported_fair <- nc("PLATFORM_NOT_SUPPORTED", "TRUE")
+  none_unsupported_format <- nc(c("CLASSIFIER_EXTENSION_GAP", "CLASSIFIER_MISTYPED")); none_limitation <- nc(c("EXTRACTION_GAP_DOI_GARBLED", "EXTRACTION_GAP_TEXT_MISSING", "SUPPORTED_PLATFORM_BUG", "CLASSIFIER_ARCHIVE_NOT_EXPANDED", "FILES_NOT_ENUMERATED"))
+  gz_n <- function(category, missed = c("GitHub", "Zenodo")) sum(gz_review$category == category & gz_review$platform_missed %in% missed)
+
+  # Downloads.
+  yes_dl <- cod$data_download %in% c("Yes", "Yes, but not all data")
+  n_dl_cooper_yes <- sum(yes_dl); n_dl_mc_true <- sum(yes_dl & mc_dl %in% TRUE); n_dl_mc_na <- sum(yes_dl & is.na(mc_dl))
+
+  # Licences on Dryad.
+  rmeta <- tapply(rm_$license, rm_$repo_url, function(v) if (all(is.na(v))) NA_character_ else v[!is.na(v)][1])
+  pre <- paste(gsub(".", "\\.", ns$.dryad_doi_prefixes(), fixed = TRUE), collapse = "|")
+  is_dry <- grepl(paste0("datadryad\\.org|(", pre, ")/dryad|doi\\.org/(", pre, ")"), names(rmeta), ignore.case = TRUE)
+  cc0_url <- "https://spdx.org/licenses/CC0-1.0.html"
+  n_dryad_licensed <- sum(is_dry & !is.na(rmeta)); n_dryad_cc0 <- sum(is_dry & rmeta %in% cc0_url); n_nondryad_cc0 <- sum(!is_dry & rmeta %in% cc0_url)
+
+  rpkg <- c("10_1111_2041_210x_13750", "10_1111_1365_2664_13806", "10_1111_2041_210x_12989", "10_1111_2041_210x_13029", "10_1111_2041_210x_13503", "10_1111_2041_210x_14252", "10_1111_2041_210x_12774", "10_1111_2041_210x_14427", "10_1111_1365_2664_13795", "10_1111_2041_210x_14148", "10_1111_2041_210x_13170", "10_1111_2041_210x_12784", "10_1111_2041_210x_13009", "10_1111_2041_210x_14417", "10_1111_1365_2435_13455", "10_1111_1365_2435_14552")
+  n_rpkg16_resolved <- sum(rpkg %in% papers_with_code)
+
+  # Comment density against Cooper et al.'s rating.
+  s_ok <- !is.na(ct$comment_lines) & !is.na(ct$code_lines)
+  a <- aggregate(cbind(comment_lines, code_lines) ~ paper_id, ct[s_ok, ], sum); a$pct <- a$comment_lines / (a$comment_lines + a$code_lines)
+  sc <- suppressWarnings(as.numeric(cod$code_annotation_scale)); j <- match(a$paper_id, ids); keep <- !is.na(sc[j]) & !is.na(a$pct)
+  x_ <- sc[j][keep]; b_ <- a[keep, ]
+  pe <- cor.test(x_, b_$pct); sp <- suppressWarnings(cor.test(x_, b_$pct, method = "spearman")); sl <- suppressWarnings(cor.test(x_, b_$comment_lines, method = "spearman")); sk <- suppressWarnings(cor.test(b_$code_lines, b_$pct, method = "spearman"))
+  cq <- list(n_both = sum(keep), n_cooper_coded = sum(!is.na(sc)), n_mc_has_stats = nrow(a), pearson_r = unname(pe$estimate), pearson_ci = pe$conf.int, pearson_p = pe$p.value,
+             spearman_rho = unname(sp$estimate), spearman_p = sp$p.value, spearman_rho_lines = unname(sl$estimate), spearman_p_lines = sl$p.value, codelines_vs_pct_rho = unname(sk$estimate), codelines_vs_pct_p = sk$p.value)
+
+  # What the modules report beyond the comparison.
+  uniq <- function(v) length(unique(v)); n_f <- nrow(ct); n_p <- uniq(ct$paper_id)
+  miss <- ct$loaded_files_missing %in% seq_len(1e6); abs_ <- ct$code_abs_path %in% TRUE; swd <- ct$code_setwd %in% TRUE
+  st2 <- s_ok & (ct$comment_lines + ct$code_lines) > 0; zero <- st2 & ct$percentage_comment == 0; pyz <- zero & ct$language %in% "Python"
+  lmb <- !is.na(ct$library_max_between); scat <- lmb & ct$library_max_between > 3
+  par <- ct$language %in% "R" & !is.na(ct$file_location) & !is.na(ct$parse_error)
+  fnd <- raw$data_check$findings; nam <- raw$repo_check$naming_issues; with_repo <- sum(st$files_n > 0, na.rm = TRUE)
+  fe <- list(n_code_files = n_f, n_code_papers = n_p, n_missing_files = sum(miss), pct_missing_files = 100 * sum(miss) / n_f, n_papers_missing = uniq(ct$paper_id[miss]), pct_papers_missing = 100 * uniq(ct$paper_id[miss]) / n_p,
+             n_abs_path = sum(abs_), pct_abs_path = 100 * sum(abs_) / n_f, n_papers_abs = uniq(ct$paper_id[abs_]), pct_papers_abs = 100 * uniq(ct$paper_id[abs_]) / n_p,
+             n_setwd = sum(swd), pct_setwd = 100 * sum(swd) / n_f, n_papers_setwd = uniq(ct$paper_id[swd]), pct_papers_setwd = 100 * uniq(ct$paper_id[swd]) / n_p,
+             n_papers_portability = uniq(ct$paper_id[abs_ | swd]), pct_papers_portability = 100 * uniq(ct$paper_id[abs_ | swd]) / n_p,
+             pct_comment_corpus = 100 * sum(ct$comment_lines[st2]) / sum(ct$comment_lines[st2] + ct$code_lines[st2]), n_zero_comment = sum(zero), pct_zero_comment = 100 * sum(zero) / sum(st2),
+             n_py_zero_comment = sum(pyz), n_py_zero_comment_has_docstring = sum(ct$has_docstring[pyz] %in% TRUE), pct_py_zero_comment_has_docstring = 100 * sum(ct$has_docstring[pyz] %in% TRUE) / sum(pyz),
+             n_scattered = sum(scat), n_scattered_denom = sum(lmb), pct_scattered = 100 * sum(scat) / sum(lmb), n_parse_denom = sum(par), n_parse_error = sum(par & ct$parse_error %in% TRUE), pct_parse_error = 100 * sum(par & ct$parse_error %in% TRUE) / sum(par),
+             n_pin_papers = sum(st$code_n > 0, na.rm = TRUE), n_pin_papers_pinned = sum(st$code_n > 0 & st$code_version_pinned %in% TRUE, na.rm = TRUE), pct_pin_papers_pinned = 100 * sum(st$code_n > 0 & st$code_version_pinned %in% TRUE, na.rm = TRUE) / sum(st$code_n > 0, na.rm = TRUE),
+             spreadsheet_findings_table = table(fnd$check), n_spreadsheet_files_flagged = uniq(fnd$source_file), n_naming_issues = nrow(nam), n_naming_bad = sum(nam$severity == "bad"), n_naming_suggestion = sum(nam$severity == "suggestion"),
+             n_papers_naming = uniq(nam$paper_id), pct_papers_naming = 100 * uniq(nam$paper_id) / with_repo, n_papers_with_repo = with_repo, naming_bad_table = table(nam$rule[nam$severity == "bad"]))
+  fe$pct_portability_three <- 100 * uniq(ct$paper_id[miss | abs_ | swd]) / n_p; fe$n_portability_three <- uniq(ct$paper_id[miss | abs_ | swd])
+
+  # --- Independent twin of the manuscript's file-extension-counts chunk. ---
+  group_ext <- function(x) {
+    x[x %in% c("csv", "tsv")] <- "csv/.tsv"; x[x %in% c("doc", "docx")] <- "doc(x)"
+    x[x %in% c("xls", "xlsx")] <- "xls(x)"; x[x %in% c("rda", "rdata", "rds")] <- "rda/.rdata/.rds"
+    x[x %in% c("shp", "shx", "dbf", "prj", "cpg", "sbn", "sbx")] <- "shp"; x
+  }
+  df_ <- sd[sd$data_type %in% "data", ]; df_$ext <- tolower(tools::file_ext(df_$file_name)); df_ <- df_[nzchar(df_$ext), ]
+  n_data_ext_raw <- length(unique(df_$ext)); df_$ext <- group_ext(df_$ext)
+  data_ext_u <- unique(df_[, c("paper_id", "ext")]); data_ext_counts <- sort(table(data_ext_u$ext), decreasing = TRUE)
+  n_data_ext <- nrow(data_ext_u); n_data_ext_top10 <- sum(data_ext_counts[1:10]); data_ext_top10 <- paste0(".", names(data_ext_counts)[1:10], collapse = ", ")
+  cf_ <- ct; cf_$ext <- tolower(tools::file_ext(cf_$file_name)); code_ext_u <- unique(cf_[, c("paper_id", "ext")])
+  n_code_ext <- nrow(code_ext_u); n_code_ext_notebook <- sum(code_ext_u$ext %in% c("rmd", "qmd", "ipynb")); n_code_ext_native <- n_code_ext - n_code_ext_notebook
+  code_lang_u <- unique(cf_[, c("paper_id", "language")]); n_code_languages <- nrow(code_lang_u); n_code_language_r <- sum(code_lang_u$language %in% "R")
+
+  # --- Independent twin of the manuscript's readme-counts chunk. ---
+  n_mc_readme <- sum(mc_readme); n_cooper_readme <- sum(c_readme %in% TRUE)
+  rd_ans <- c("Yes", "Quasi-README")
+  n_cooper_readme_data <- sum(cod$data_README %in% rd_ans)
+  n_cooper_readme_code_only <- sum(cod$code_README %in% rd_ans & !cod$data_README %in% rd_ans)
+  n_readme_description_dryad <- sum(rv_readme & rv$any_readme_verdict %in% "DIFFERENT_DEFINITION" &
+                                      grepl("landing page|description|abstract", rv$any_readme_comment, ignore.case = TRUE) &
+                                      grepl("dryad", rv$any_readme_comment, ignore.case = TRUE))
+
+  # --- Independent twin of the manuscript's reproducibility-counts chunk. ---
+  rcheck <- raw$reproducibility_check
+  rc_st <- raw$summary_table; rc_all <- rcheck$run_results; rc_install <- rcheck$install_results; rc_changes <- rcheck$modifications
+  rc_excluded <- c("run_by_source", "run_by_import", "jags_model", "not_r_content",
+                   "defines_functions", "not_analysis", "docker_failed", "not_downloaded")
+  n_rc_excl <- function(o) sum(rc_all$outcome %in% o)
+  n_rc_source <- n_rc_excl(c("run_by_source", "run_by_import")); n_rc_defines <- n_rc_excl("defines_functions")
+  n_rc_jags <- n_rc_excl("jags_model"); n_rc_not_analysis <- n_rc_excl("not_analysis")
+  n_rc_not_r_content <- n_rc_excl("not_r_content"); n_rc_not_downloaded <- n_rc_excl("not_downloaded")
+  rc_runs <- rc_all[!rc_all$outcome %in% rc_excluded & !is.na(rc_all$outcome), ]
+  n_rc_papers <- sum(rc_st$repro_code_n > 0, na.rm = TRUE); n_rc_not_run <- n_mc_code - n_rc_papers
+  n_rc_scripts <- nrow(rc_runs); n_rc_ok <- sum(rc_runs$outcome == "ran_ok")
+  rc_ok_by_paper <- split(rc_runs$outcome == "ran_ok", rc_runs$paper_id)
+  n_rc_all_ok <- sum(vapply(rc_ok_by_paper, all, logical(1))); n_rc_none_ok <- sum(!vapply(rc_ok_by_paper, any, logical(1)))
+  n_rc_some_ok <- length(rc_ok_by_paper) - n_rc_all_ok - n_rc_none_ok
+  rc_ext_ <- tolower(tools::file_ext(rc_runs$file_name)); rc_is_py <- rc_ext_ %in% c("py", "ipynb")
+  n_rc_python <- sum(rc_is_py); n_rc_python_ok <- sum(rc_is_py & rc_runs$outcome == "ran_ok")
+  n_rc_r <- n_rc_scripts - n_rc_python; n_rc_r_ok <- n_rc_ok - n_rc_python_ok
+  rc_reason <- rc_runs$reason; rc_reason[rc_runs$outcome == "ran_ok"] <- NA_character_
+  rc_message <- paste(rc_runs$error, rc_runs$stderr)
+  n_rc_failed <- sum(!is.na(rc_reason)); n_rc_failed_papers <- length(unique(rc_runs$paper_id[!is.na(rc_reason)]))
+  n_reason <- function(r) sum(rc_reason %in% r); n_reason_papers <- function(r) length(unique(rc_runs$paper_id[rc_reason %in% r]))
+  n_rc_outcome <- function(o) sum(rc_runs$outcome == o)
+  n_rc_others_software <- sum(rc_reason %in% "package" & grepl("No module named '(cvat|motioneye)", rc_message))
+  n_rc_declared <- nrow(rc_install); n_rc_not_installed <- sum(!rc_install$installed)
+  n_rc_not_installed_papers <- length(unique(rc_install$paper_id[!rc_install$installed]))
+  n_rc_not_on_cran <- sum(rc_install$category[!rc_install$installed] %in% "cran_unavailable")
+  rc_failed_packages <- sort(table(rc_install$package[!rc_install$installed]), decreasing = TRUE)
+  n_rc_change <- function(type) sum(rc_changes$change_type == type); n_rc_changed_papers <- length(unique(rc_changes$paper_id))
+  rc_complete <- ids[cod$data_completeness %in% "Complete"]
+  rc_missing <- rc_st$paper_id[rc_st$repro_missing_inputs > 0 & !is.na(rc_st$repro_missing_inputs)]
+  rc_complete_run <- intersect(rc_complete, names(rc_ok_by_paper))
+  n_rc_complete <- length(rc_complete_run); n_rc_complete_missing <- length(intersect(rc_complete_run, rc_missing))
+  n_rc_complete_any_ok <- sum(vapply(rc_ok_by_paper[rc_complete_run], any, logical(1)))
+  n_rc_complete_all_ok <- sum(vapply(rc_ok_by_paper[rc_complete_run], all, logical(1)))
+  n_rc_missing_all <- length(intersect(names(rc_ok_by_paper), rc_missing))
+
+  # --- Independent twin of the manuscript's code-annotation-counts chunk. ---
+  cc_f <- ct[!is.na(ct$percentage_comment), ]
+  n_cc_files <- nrow(cc_f); n_cc_papers <- length(unique(cc_f$paper_id))
+  cc_z <- cc_f$percentage_comment == 0
+  n_cc_zero <- sum(cc_z); n_cc_zero_papers <- length(unique(cc_f$paper_id[cc_z]))
+  cc_zpy <- cc_z & cc_f$language %in% "Python"
+  n_cc_zero_py <- sum(cc_zpy); n_cc_zero_py_docstring <- sum(cc_f$has_docstring[cc_zpy] %in% TRUE)
+  cc_comment_median <- median(cc_f$comment_lines)
+  cc_comment_q <- quantile(cc_f$comment_lines, c(.25, .75), names = FALSE)
+  cc_code_median <- median(cc_f$code_lines)
+  cc_r <- suppressWarnings(as.numeric(cod$code_annotation_scale))
+  n_cc_rated <- sum(!is.na(cc_r)); cc_rating_median <- median(cc_r, na.rm = TRUE)
+
+  pct1 <- function(x) sprintf("%.1f", x * 100)
+  pfmt <- function(p) if (p < .001) "< .001" else sprintf("= %.3f", p)
+  mcnemar_str <- function(r) sprintf("$\\chi^2$(%d) = %.2f, *p* %s", r$mcnemar_df, r$mcnemar_stat, pfmt(r$mcnemar_p))
+  vt <- function(tallies, verdict) { n <- unname(tallies[verdict]); if (is.na(n)) 0L else n }
+  cc <- function(tab, bucket) { n <- unname(tab[bucket]); if (is.na(n)) 0L else n }
+  for (nm_ in ls()) assign(nm_, get(nm_), envir = ind)
+})
+```
+
+```{r}
+#| label: number-register
+#| include: false
+
+# Every inline expression of the manuscript, evaluated with the manuscript's own objects
+# and with the independent ones.
+in_chunk <- (cumsum(grepl("^```", manuscript)) %% 2 == 1) | grepl("^```", manuscript)
+yaml_end <- which(manuscript == "---")[2]
+section <- character(length(manuscript)); current <- "Front matter"
+for (i in seq_along(manuscript)) {
+  if (!in_chunk[i] && grepl("^#{2,4} ", manuscript[i])) current <- sub("^#+ ", "", manuscript[i])
+  section[i] <- current
+}
+inline_pattern <- "`r [^`]+`"
+show <- function(e, env) tryCatch(paste(format(eval(parse(text = e), envir = env)), collapse = " "), error = function(err) NA_character_)
+register <- do.call(rbind, lapply(which(!in_chunk & seq_along(manuscript) > yaml_end), function(i) {
+  m <- gregexpr(inline_pattern, manuscript[i], perl = TRUE)[[1]]
+  if (m[1] < 0) return(NULL)
+  do.call(rbind, lapply(seq_along(m), function(k) {
+    e <- substr(manuscript[i], m[k] + 3, m[k] + attr(m, "match.length")[k] - 2)
+    before <- gsub(inline_pattern, "#", substr(manuscript[i], 1, m[k] - 1), perl = TRUE)
+    before <- substr(before, max(1, nchar(before) - 70), nchar(before))
+    data.frame(line = i, section = section[i], expr = e, before = before, value = show(e, ms), independent = show(e, ind))
+  }))
+}))
+same <- function(a, b) a == b | (suppressWarnings(as.numeric(a)) == suppressWarnings(as.numeric(b))) %in% TRUE
+register$same <- same(register$value, register$independent)
+
+esc <- function(x) {
+  x <- gsub("`", "", x, fixed = TRUE)
+  x <- gsub("[\r\n]+", " ", x)
+  x <- gsub("\\$\\\\chi\\^2\\$", "chi-squared", x)
+  x <- gsub("([\\\\*_|$%#&~^<>@\\[\\]{}])", "\\\\\\1", x, perl = TRUE)
+  gsub("\\\\([~^])", "", x)
+}
+md_table <- function(df, widths) {
+  head <- paste0("| ", paste(names(df), collapse = " | "), " |")
+  rule <- paste0("|", paste(strrep("-", widths), collapse = "|"), "|")
+  rows <- apply(df, 1, function(r) paste0("| ", paste(r, collapse = " | "), " |"))
+  cat("", head, rule, rows, "", sep = "\n")
+}
+# Sections already shown by a num_table() call, so the completeness table at
+# the end can list every section that was not shown by hand.
+shown_sections <- character(0)
+render_rows <- function(r) {
+  md_table(data.frame(Line = r$line, `Text before the number` = paste0("...", esc(r$before)),
+                      Manuscript = esc(r$value), Recomputed = esc(r$independent),
+                      Status = ifelse(r$same %in% TRUE, "Same", "**Differs**"), check.names = FALSE),
+           c(5, 54, 14, 14, 11))
+}
+num_table <- function(sec) {
+  shown_sections <<- union(shown_sections, sec)
+  r <- register[register$section == sec, ]
+  if (nrow(r) == 0) {
+    cat("\n*No computed numbers under a manuscript heading named \"", sec, "\".*\n", sep = "")
+    return(invisible())
+  }
+  render_rows(r)
+}
+# Every register row whose section was not already shown by a num_table() call
+# above, so that no computed number in the manuscript escapes this audit even
+# when a heading is renamed or a section is added.
+remaining_tables <- function() {
+  rest <- register[!register$section %in% shown_sections, ]
+  if (nrow(rest) == 0) {
+    cat("\n*Every computed number is listed under one of the headings above.*\n")
+    return(invisible())
+  }
+  for (sec in unique(rest$section)) {
+    cat("\n### ", sec, "\n", sep = "")
+    render_rows(rest[rest$section == sec, ])
+  }
+}
+```
+
+# Purpose and method
+
+This document records, for the manuscript "Automating Data- and Code-Archiving Checks with Metacheck", where each number comes from and whether each factual statement is accurate. It has two parts. Part 1 is a register of numbers. Part 2 is a register of factual statements. It replaces `numbers_audit.md` of the earlier repository (Lakens/cooper-bes-validation) and keeps that file's fields: the location of a number, what it means, the chain of files that produce it, the formula, and how to read it. The checks and explanations were produced by Claude (Anthropic's AI model, Opus 5.5) at the request of Daniël Lakens, and have not yet been reviewed by a person.
+
+```{r}
+#| label: state
+#| include: false
+
+verified_md5 <- "68f5d1969b9802334359309e96a5c2ed"
+current_md5 <- unname(tools::md5sum("documentation/manuscript.qmd"))
+targets::tar_load(metacheck_sha, store = "_targets")
+state_note <- if (identical(current_md5, verified_md5)) {
+  "The manuscript file is unchanged since this verification, so the line numbers in this document are correct."
+} else {
+  "**The manuscript file has changed since this verification.** The tables of Part 1 show the current text and values, and the status tables in the Summary of results show where each statement of Part 2 is now and whether it has been resolved. The line numbers and quotations inside the written entries of Part 2 are those of 1 November 2026."
+}
+```
+
+**State of the documents.** The verification was carried out on 1 November 2026, on commit `a704280` of Lakens/bes_validation, plus the reclassification of the README disagreements made later that day, with results produced by Metacheck 0.4.2.1 at commit `r substr(metacheck_sha, 1, 8)`. It was updated on 10 November 2026: the independent recomputation was extended to every section of the revised manuscript (including the reproducibility check, which uses its own later run), the table of typed numbers was brought up to date, and the status of each statement is now established at every render. `r state_note` Values in the tables are computed each time this document is rendered. Values in the written explanations were measured on that date. This document is not part of the pipeline in `_targets.R`; render it with `quarto::quarto_render("documentation/manuscript_verification.qmd")` after running the pipeline.
+
+**How the numbers were checked.** A number in the manuscript is either computed by code when the manuscript is rendered, or typed by hand. For each computed number, this document takes the exact expression from the manuscript and evaluates it twice: once with the objects the manuscript uses, which the pipeline produces, and once with objects recomputed here by separately written code from the raw files `data/metacheck_results.rds`, `data/cooper_coded_data.csv`, `data/papers_data.csv` and the review files. The recomputation joins Cooper et al.'s rows to papers by their paper number, whereas the pipeline joins on a corrected DOI, so it also tests that correction. Two things are shared with the pipeline, because a copy would only repeat the same rule: the functions that assign a platform to an address (`repo_url_platform()`, `is_institutional_figshare()`), and the text patterns that sort review comments into causes. Agreement therefore shows that a number follows correctly from the files. It does not show that a human judgement stored in a review file is correct; Part 2 examines those judgements.
+
+**How the statements were checked.** Each statement was tested against the most direct evidence available: the data, the review files, the code of the Metacheck version that was run (version 0.4.2.1, read from the installed package), the cited source, or a live request to the service concerned. The evidence used is named in each entry. Cooper et al. (2026) was read in full in the published version. Several other cited pages refused automated access, and the entries concerned say so; they are the BES author guidelines, the article by Obels et al. and the report by Vilhuber and Cavanagh.
+
+**Verdicts.** Every statement in Part 2 carries one verdict.
+
+- **TRUE**: the evidence supports the statement as written.
+- **QUALIFIED**: the statement is correct in substance, but as written it is imprecise or incomplete in a way a reader could be misled by. The entry says what to change.
+- **FALSE**: the evidence contradicts the statement, or the statement describes something that no longer exists. The entry gives the root of the error and a correction.
+- **UNVERIFIED**: the statement could not be tested. The entry says what would settle it.
+- **JUDGEMENT**: the statement is an evaluation or a prediction rather than a fact. The entry gives the facts it rests on.
+
+```{r}
+#| label: verdict-counts
+#| include: false
+
+self <- readLines("documentation/manuscript_verification.qmd", warn = FALSE, encoding = "UTF-8")
+entry <- grepl("^\\*\\*C[0-9]+\\.[0-9]+ — (TRUE|QUALIFIED|FALSE|UNVERIFIED|JUDGEMENT)\\.\\*\\*", self)
+verdict <- sub("^\\*\\*C[0-9.]+ — ([A-Z]+)\\..*$", "\\1", self[entry])
+entry_id <- sub("^\\*\\*(C[0-9.]+) — .*$", "\\1", self[entry])
+entry_text <- sub("^\\*\\*C[0-9.]+ — [A-Z]+\\.\\*\\* *", "", self[entry])
+counts <- table(factor(verdict, c("TRUE", "QUALIFIED", "FALSE", "UNVERIFIED", "JUDGEMENT")))
+n_same <- sum(register$same %in% TRUE)
+differ <- register[!(register$same %in% TRUE), , drop = FALSE]
+differ_lines <- if (nrow(differ)) paste(sort(unique(differ$line)), collapse = ", ") else ""
+
+# Where each entry's quotation is in the current manuscript. The entries quote the text
+# of 1 November 2026; this searches the source (outside code) and the rendered PDF, so
+# that quotations holding computed numbers are found too.
+norm_txt <- function(x) {
+  x <- gsub("[“”]", "\"", x)
+  x <- gsub("[‘’]", "'", x)
+  x <- gsub("[`*_]", "", x)
+  gsub("[[:space:]]+", " ", x)
+}
+ms_norm <- norm_txt(manuscript)
+pdf_norm <- if (file.exists("documentation/manuscript.pdf")) {
+  p <- paste(pdftools::pdf_text("documentation/manuscript.pdf"), collapse = "\n")
+  p <- gsub("-\n[[:space:]]*", "", p)
+  norm_txt(gsub("ﬁ", "fi", gsub("ﬂ", "fl", p)))
+} else ""
+locate <- function(x) {
+  q <- regmatches(x, regexpr("\"[^\"]{12,}\"", x))
+  fr <- if (length(q)) trimws(strsplit(gsub("^\"|\"$", "", q), "[.][.][.]|…")[[1]]) else character(0)
+  fr <- norm_txt(gsub("^[(]|[)]$", "", fr))
+  fr <- fr[nchar(fr) >= 15]
+  if (!length(fr)) return(c("No quotation", "unknown"))
+  hit <- unique(unlist(lapply(fr, function(f) which(!in_chunk & grepl(f, ms_norm, fixed = TRUE)))))
+  found <- vapply(fr, function(f) any(grepl(f, ms_norm, fixed = TRUE)) || grepl(f, pdf_norm, fixed = TRUE), TRUE)
+  where <- if (length(hit)) paste(ifelse(hit <= yaml_end, "Abstract", paste("Line", hit)), collapse = ", ") else if (any(found)) "In the text" else "Not in the text"
+  c(where, if (all(found)) "all" else if (any(found)) "part" else "none")
+}
+loc <- t(vapply(entry_text, locate, c("", ""), USE.NAMES = FALSE))
+
+# What was decided or changed after 1 November 2026, entry by entry. Kept by hand: add a
+# row when an entry is settled.
+decided <- read.csv(text = '
+id,status,note
+C1.1,Resolved,"The abstract was rewritten on 10 November 2026, and the uncited estimates are no longer in it."
+C1.8,Author\'s decision,"Kept. The later rerun changed none of the earlier disagreements, so their verdicts did not need to be made again. The abstract now states that Claude Opus 5.5 reviewed every disagreement."
+C1.14,Resolved,"The address is now https://github.com/scienceverse/bes_validation, where the repository will be moved. It must be public at submission."
+C2.3,Author\'s decision,"Kept without a citation: no scoping review covers both funders and journals over the last 20 years (see the entry)."
+C2.7,Resolved,"The sentence was removed."
+C2.10,Resolved,"Now: code was not always well-annotated."
+C2.11,Resolved,"The claim was removed. The text now cites studies that reran shared code."
+C2.24,Resolved,"The word trained was removed."
+C2.27,Resolved,"Sections 7 (code annotation) and 8 (citable data and code) were added, so each of the eight questions has a section."
+C2.29,Resolved,"The text now names the settings chosen by hand and the access keys a rerun needs."
+C2.36,Resolved,"Replaced by a general statement that Metacheck found licences, READMEs and repositories the coders did not classify."
+C3.3,Resolved,"Now: GROBID 0.9.0."
+C3.5,Resolved,"Section 6 now reports the results of the module."
+C4.14,Resolved,"Now: papers archived either data or code."
+C4.17,Resolved,"Now: papers where Metacheck found data or code that Cooper\'s coders had not coded as shared."
+C4.19,Resolved,"The code now counts hosts: 41 Figshare-based hosts and 250 repositories. The word over was removed."
+C5.1,Resolved,"The text now states that Claude Opus 5.5 reviewed the 274 papers, one paper at a time."
+C5.13,Resolved,"Now: JPG files."
+C5.14,Resolved,"Now: archives that cannot be opened by R."
+C5.19,Resolved,"Now: the remaining 1674 shared them in a way that allows an automated tool, in principle, to locate the repository and access the files."
+C6.4,Resolved,"Removed. The author reports that the observation was true but was not logged."
+C6.8,Resolved,"Now: Some of the differences; the 55 papers are described as most often missing a second repository."
+C9.2,Resolved,"The sentence listing a confusion table and tests is no longer in the text."
+C9.5,Resolved,"The sentence on a final review and its folder is no longer in the text."
+C15.6,Author\'s decision,"Corrected: only file contents need a key. Kept: the stricter limits on the number of API calls, which the run met (the appendix records refusals with HTTP 429), although Dryad does not document them."
+C2.28,Resolved,"Now: the comparison coding."
+C8.1,Resolved,"No reference to a Results or Coding section remains in the text (checked on 10 November 2026)."
+C11.5,Resolved,"The paragraph is no longer in the text. Section 8 now gives 46 of the 57 licence disagreements as automatic coding correct, and Table 4 gives all five verdicts."
+C18.6,Resolved,"The repeated account of the 16 repositories is no longer in the text."
+C18.7,Resolved,"Now: Appendix A documents in full detail how Metacheck improved over the course of this project. The second clause was removed."
+C1.15,Resolved,"The statement now declares that the authors are the developers of Metacheck and have an interest in showing that it performs well."
+C6.5,Resolved,"Now: the dominant data repository in the papers they examined. The percentages are those Cooper et al. report, as shares of platform labels."
+C7.9,Resolved,"Now explains that in four of the six the files download as the coders recorded but are not usable data tables, and that in two the coders were wrong. The typo was fixed."
+C2.4,Resolved,"The quotation now comes from the BES data archiving policy (https://besjournals.onlinelibrary.wiley.com/hub/data_archiving_policy), read on 10 November 2026: data must be archived as a condition for publication, and model code for theoretical papers."
+C2.5,Resolved,"Now: checking whether authors follow through is difficult; BES journal staff check that data and code are archived but do not have the skills or capacity to guarantee requirements such as completeness (Cooper et al., p. 1955)."
+C2.21,Resolved,"Now: eight groups of questions, here and where the questions are referred to again."
+C4.7,Author\'s decision,"Kept: the author, a developer of the module, confirms that it was designed to be over-inclusive."
+C4.12,Resolved,"Now: the two tools do not examine whether data and code are shared by examining the contents of data repositories, as other Metacheck modules do."
+C4.16,Resolved,"Now: according to the Metacheck modules that examine the data and code in repositories."
+C5.5,Resolved,"Now: so the data could not be retrieved automatically when we checked."
+C5.11,Resolved,"The unmeasured claim that these repositories occur less frequently was removed."
+C5.17,Resolved,"Now: the text produced by GROBID lacked the data availability statement, usually because this section followed the reference list."
+C6.2,Resolved,"Now: Cooper et al. note that 60% of code files hosted on GitHub or similar platforms were also archived on Zenodo (p. 1959), and GitHub is spelled correctly."
+C6.7,Resolved,"Now names the five categories of the table."
+C7.4,Resolved,"Now: where both Metacheck and the manual coders gave an answer, they agreed for 1338."
+C2.13,Resolved,"Now: This practice is well established in economics journals."
+C2.15,Resolved,"Now: a project led by the Data Editor of the American Economic Association. The author chose not to add the address of the talk page."
+C2.31,Resolved,"Now: Metacheck relies on data and code being shared according to the FAIR principles, the idea being that ..."
+C2.32,Resolved,"Now gives the two reasons: a table in a PDF cannot be read reliably by a machine, and the file has no persistent identifier of its own."
+C3.1,Resolved,"Now mentions that four DOIs in the dataset were wrong and were corrected."
+C3.2,Resolved,"Now: the articles were downloaded from the publisher and from Europe PMC with an R script, and the full texts are not shared because of copyright. Note: data/papers_data.csv records no source for 703 papers."
+C5.4,Resolved,"Now: papers where Cooper and colleagues\' coders coded data or code as shared, here and in the sentence on the 1789 papers."
+C5.8,Resolved,"Now: a 2025 survey of 66 repositories. The full report (read on 10 November 2026) confirms the 66 responses, the over 90%, the slow-downs and outages, rate limiting as a measure, and the blocking of legitimate users."
+C5.12,Resolved,"Now: in a repository Metacheck supports."
+C6.9,Resolved,"Now: 215 links to GitHub and GitLab, and 31 of these links."
+C6.11,Resolved,"Now: Cooper and colleagues asked coders to count data the paper generated or collated, but did not record whether archived files were created by the authors."
+C6.12,Resolved,"Now: point to a repository whose owner is not an author of the manuscript or their research group."
+C7.2,Resolved,"The parenthesis now includes FAIR repositories that Metacheck does not support."
+C15.2,Resolved,"Both placeholders were replaced by references: bibr (Werner, 2026) and the manuscript on machine-readable FAIR data and code (Lakens, Mesquida, and DeBruine, 2026)."
+', stringsAsFactors = FALSE)
+# Entries whose statement was removed from the manuscript after 1 November 2026. Each was
+# checked on 10 November 2026 by searching the manuscript for the words that carry its claim.
+removed_checked <- c("C1.7", "C1.10", "C4.10", "C8.3", "C8.4", "C8.5", "C8.7", "C8.8", "C8.9", "C8.10",
+                     "C9.1", "C9.3", "C9.7", "C9.8", "C9.10", "C9.12", "C10.2", "C10.3", "C10.4", "C10.7",
+                     "C10.8", "C10.10", "C11.3", "C11.6", "C11.7", "C11.8", "C12.3", "C12.7", "C12.8", "C12.10",
+                     "C12.11", "C12.13", "C15.4", "C15.9", "C16.1", "C16.3", "C16.5", "C16.9", "C16.11", "C17.1",
+                     "C17.2", "C18.1", "C18.3", "C18.5", "C19.1", "C19.2", "C19.3", "C19.5")
+decided <- rbind(decided, data.frame(id = setdiff(removed_checked, decided$id), status = "Statement removed",
+  note = "The statement is no longer in the manuscript (checked on 10 November 2026 by searching for the words that carry its claim)."))
+issue <- verdict %in% c("FALSE", "QUALIFIED", "UNVERIFIED")
+section_removed <- sub("[.].*$", "", entry_id) %in% c("C13", "C14")
+entry_status <- ifelse(entry_id %in% decided$id, decided$status[match(entry_id, decided$id)],
+                ifelse(section_removed, "Section removed",
+                ifelse(loc[, 2] == "none", "Text removed or rewritten",
+                ifelse(loc[, 2] == "unknown", "Check by hand", "Open"))))
+entry_note <- ifelse(entry_id %in% decided$id, decided$note[match(entry_id, decided$id)],
+              ifelse(section_removed, "The section was removed from the manuscript.",
+              ifelse(loc[, 2] == "none", "The quoted words are no longer in the manuscript; the new wording was not checked again.",
+              ifelse(loc[, 2] == "part", "Part of the quoted words are still in the manuscript.",
+              ifelse(loc[, 2] == "unknown", "The entry quotes no words that can be searched for.",
+                     "The quoted words are still in the manuscript.")))))
+status_levels <- c("Open", "Partly resolved", "Check by hand", "Resolved", "Author's decision", "Statement removed", "Section removed", "Text removed or rewritten")
+status_counts <- table(factor(entry_status[issue], status_levels))
+n_issue <- sum(issue)
+n_still_open <- sum(status_counts[c("Open", "Partly resolved", "Check by hand")])
+status_table <- function(keep) {
+  k <- issue & entry_status %in% keep
+  if (!any(k)) {
+    cat("\n*None.*\n")
+    return(invisible())
+  }
+  md_table(data.frame(Entry = entry_id[k], Verdict = verdict[k], `Where now` = loc[k, 1],
+                      Status = paste0("**", entry_status[k], ".** ", esc(entry_note[k])), check.names = FALSE),
+           c(7, 17, 14, 58))
+}
+# An entry has one row in decided; a second row for the same entry would be ignored.
+stopifnot(!anyDuplicated(decided$id))
+```
+
+# Summary of results
+
+**Numbers.** The manuscript computes `r nrow(register)` numbers in its text. Of these, `r n_same` are reproduced by the independent recomputation, and `r nrow(register) - n_same` differ`r if (nchar(differ_lines)) paste0(" (on manuscript line(s) ", differ_lines, ")") else ""`. Each differing number is shown with its recomputed value, marked **Differs**, in the register tables of Part 1 below. The count of repositories Metacheck supports differed until 10 November 2026, because the manuscript's code counted the DOI prefixes of Figshare-based repositories as if they were hosts (76 and 285 instead of 41 and 250); the code was corrected then (entry C4.19). Part 1 also lists the typed numbers, and those that could not be traced. This summary paragraph was written for the 1 November 2026 state of the manuscript; the counts in it are recomputed on each render, but the narrative explanation of a specific difference may be out of date if the manuscript has since changed.
+
+**Statements.** Part 2 contains `r length(verdict)` entries, with the verdicts given on 1 November 2026: `r counts[["TRUE"]]` TRUE, `r counts[["QUALIFIED"]]` QUALIFIED, `r counts[["FALSE"]]` FALSE, `r counts[["UNVERIFIED"]]` UNVERIFIED and `r counts[["JUDGEMENT"]]` JUDGEMENT.
+
+**Status of the statements on `r format(Sys.Date(), "%d %B %Y")`.** The manuscript was revised after 1 November 2026, so the status of each entry judged FALSE, QUALIFIED or UNVERIFIED is established again at every render: its quotation is searched for in the current manuscript, and what was decided or changed for it is recorded. Of these `r n_issue` entries, `r status_counts[["Resolved"]]` are resolved by a change to the text, `r status_counts[["Author's decision"]]` were settled by a decision of the author, `r status_counts[["Statement removed"]]` concern statements that were removed from the text, `r status_counts[["Section removed"]]` belong to sections that were removed, and for `r status_counts[["Text removed or rewritten"]]` the quoted words are no longer in the manuscript, but the new wording was not checked again. `r n_still_open` `r if (n_still_open == 1) "remains" else "remain"` open: their quoted words are still in the manuscript (`r status_counts[["Open"]]`), the change covers only part of the entry (`r status_counts[["Partly resolved"]]`), or the entry quotes no words that can be searched for and must be checked by hand (`r status_counts[["Check by hand"]]`). The two tables below list them; the line numbers in the column "Where now" are those of the current manuscript, whereas the line numbers in the entries themselves are those of 1 November.
+
+On 1 November 2026, most false statements had one of three roots. The first is **text that outlived the project stage it describes**: passages written for earlier versions of Metacheck or the earlier repository still describe files, reruns, sections and behaviour that no longer exist. This explains the paths to files that are not in this repository, the references to a "Coding section" and "Results", the naming rules that the module no longer has, and the crash that no longer occurs. The second is **a sentence that describes a broader pattern than its count supports**, such as a count of 55 papers described as all having the same cause when 27 do. The third is **a general statement that contradicts another part of the manuscript**: the Discussion says undetected repositories are overwhelmingly on Dryad, Zenodo or Figshare, whereas the Results, correctly, say they are mostly on platforms Metacheck does not support.
+
+**The most consequential finding concerned a definition, and it has been acted on.** The manuscript called 294 README disagreements coder errors because no README file exists. Cooper et al. asked whether the data have a "README/metadata" and report a "README or equivalent" (p. 1960), so a coder who counted a description field answered the question as asked. On 1 November 2026 the author reclassified these 294 as `DIFFERENT_DEFINITION`, and the text was changed accordingly (entries C1.11, C12.4, C12.9, C16.7). The agreement percentages do not change. A second finding concerns the licence review: in four disagreements the comment does not support the verdict, although a check on the coded deposits suggests the verdict is right (entry C11.6).
+
+```{r}
+#| label: list-of-false
+#| results: asis
+
+cat("\n**Entries still open.** Each of these needs a change to the text or a decision.\n")
+status_table(c("Open", "Partly resolved", "Check by hand"))
+cat("\n**Entries settled since 1 November 2026.**\n")
+status_table(c("Resolved", "Author's decision", "Statement removed", "Section removed", "Text removed or rewritten"))
+```
+
+# Part 1: Register of numbers
+
+Each section below follows the manuscript's own sections. A section first explains what its numbers mean and how they are produced, and then lists every computed number with the words before it, the value the manuscript prints, the independently recomputed value, and whether they are the same. In the words before a number, the sign # stands for another computed number. Paper-level answers from Metacheck are produced by `recreate_cooper_columns()` and joined to Cooper et al.'s data by `build_cooper_vs_metacheck()` and `build_master_comparison()`; the statistics by `compute_comparison_statistics()`. All are defined in `code/R/` and run by `_targets.R`.
+
+## Hackathon coding (Introduction)
+
+*Definition.* The number of papers each of Cooper et al.'s 145 participants coded. *Provenance.* Column `recorder_ID` of `data/cooper_coded_data.csv`, carried into the target `master_comparison`. *Formula.* The median, minimum and maximum of the counts per value of `recorder_ID`. *Interpretation.* It shows how the work was divided: half of the participants coded at most 10 papers, and one coded 68.
+
+```{r}
+#| results: asis
+num_table("Introduction")
+```
+
+## Text-based judgements of open data and code
+
+*Definition.* How well two tools that read only the article's text agree with the coders' answer to whether archived data or code could be opened. OddPub (version 7.3.0, in `code/modules/`) and Metacheck's `open_practices` module each give TRUE or FALSE per paper. *Provenance.* `summary_table$data_open`, `code_open`, `data_open.oddpub` and `code_open.oddpub` of `data/metacheck_results.rds`, and columns `data_open` and `code_open` of Cooper et al.'s file. *Formula.* A coder answer of "Yes" counts as open, and for data also "Yes, but not all files"; "No" counts as not open; other answers and blanks are left out. Sensitivity is the share of open papers the tool calls open, specificity the share of not-open papers it calls not open, and accuracy the share of papers on which they agree. The second paragraph applies the tools to the papers left out: papers that archived data or code without an answer ("blank"), and papers with the answer "Needs specific software or too large" or "Maybe if I had the right software". *Interpretation.* The specificity values rest on 11 papers for data and 3 for code, so one paper moves the code value by 33 percentage points. These values should not be compared between tools.
+
+```{r}
+#| results: asis
+num_table("Oddpub and Open Practices Check")
+```
+
+## Papers with data or code, and supported repositories
+
+*Definition.* The first paragraph counts papers on each side. For Cooper et al., a paper counts when `data_availability` or `code_archived` is "Yes". For Metacheck, `n_mc_repo_found` counts papers with at least one listed file of any kind (`summary_table$files_n` above zero); `n_mc_data` counts papers with at least one file `data_check` classified as data; `n_mc_code` counts papers with at least one row in `code_check`'s table. *Formula.* Agreements and the two directions of disagreement are set operations on paper identifiers. *Interpretation.* The three Metacheck-side counts are nested differently from the Cooper-side counts: Cooper et al.'s "Yes" can rest on supporting information, whereas Metacheck requires a repository.
+
+The second paragraph counts repositories from lists inside Metacheck (`.dataverse_hosts()`, `.dspace7_hosts()`, `.dspace_legacy_hosts()`, `.dataone_hosts()`, `.figshare_vanity_hosts()`, `.figshare_doi_prefix_hosts()`), plus 11, which is typed into the manuscript's code. **The Figshare count is wrong.** The manuscript takes `union(.figshare_vanity_hosts(), names(.figshare_doi_prefix_hosts()))`. The names of that second list are DOI prefixes (for example `10.17633`), and its values are hosts (for example `brunel.figshare.com`). The Dataverse list has it the other way round, with hosts as names, and this difference is the root of the error: code written for the Dataverse list was reused. The union therefore adds 35 prefixes to 41 hosts, giving 76, whereas the prefixes all point to hosts already counted. *Correction.* In `data-code-archiving-counts`, use `figshare_hosts <- union(metacheck:::.figshare_vanity_hosts(), unlist(metacheck:::.figshare_doi_prefix_hosts()))`, which gives 41 hosts and a total of 250. The 11 dedicated platforms are confirmed: each has its own functions in the package (C4.18).
+
+```{r}
+#| results: asis
+num_table("Repo check, Data check, and Code check")
+```
+
+## Reasons Metacheck missed data or code (section 1, and table of reasons)
+
+*Definition.* Each of the 274 papers where the coders found data or code and Metacheck found none has one row in `data/review/manual_repo_findability_audit_data.csv`, with a cause in `root_cause_category`, and one row in `manual_fair_api_findability_audit_data.csv`, with a judgement of whether the deposit is FAIR. *Formula.* The clusters are sums of categories, defined in chunk `full-317-audit-load`; they are mutually exclusive and the chunk stops if they do not add up to 274. "Not FAIR" papers are the 18 without a repository, the 16 whose format is not FAIR and the 81 with a link or repository that is not FAIR, 115 in total. The share of 90.5% is 1515 divided by 1789 minus 115. *Interpretation.* All of these numbers follow arithmetically from that one review. Their accuracy therefore rests on that review, in which each paper was read by one AI agent, with no second reader for most rows. No row was checked against the version of Metacheck in the final run: all 274 rows carry an earlier version (mostly 109a9aa or 610cd4f2), though the pipeline's target `audit_staleness` lists them for this purpose. Because the 274 are defined by the final run, the set of papers is current, but each explanation is as of its stated date.
+
+These numbers appear in the manuscript under the heading "Repo check, Data check, and Code check" and are in the table above.
+
+## Platforms and reuse (section 2)
+
+*Definition.* Comparison of the set of platforms each side names per paper. Only papers where both sides name at least one platform are comparable. *Provenance.* `results$data_archive` and `results$code_archive`, from `platform_set_comparison()` in `code/R/platforms.R`. OSF on Metacheck's side and CRAN on Cooper et al.'s side are mapped to "Other repo/database", and "Supplementary materials" and "Personal website" are removed before the comparison. *Formula.* "Exact" means equal sets, "mc_fewer" means Metacheck's set is a strict subset, "mc_more" the reverse. The reuse numbers come from `data/review/github_repository_ownership_review_data.csv`. *Interpretation.* `n_github_repos` (215) and `n_third_party_repos` (31) count rows, each a pair of paper and repository, not distinct repositories: the distinct counts are 214 and 30 (entry C6.9).
+
+```{r}
+#| results: asis
+num_table("2. Where were the data/code archived?")
+```
+
+## Downloads and code (section 3)
+
+*Definition.* `n_dl_cooper_yes` counts papers whose `data_download` is "Yes" or "Yes, but not all data". `mc_data_download` is TRUE when at least one data file was saved and is usable as a table, FALSE when files were saved but none is usable, and missing when none was saved. *Provenance.* `recreate_cooper_columns()`; verdicts from `data/review/disagreement_review_data.xlsx`; the code categories from columns `code_category` and `code_category_reason` of the same file, which were entered by hand on 1 November 2026 for 203 rows. *Formula.* Agreement is the share of papers where both sides have an answer and the answers match. *Interpretation.* The agreement of 99.2% applies only to papers where Metacheck saved a file; counted over all papers the coders downloaded, the share is 83.6%, and the manuscript reports both. The numbers from `n_dl_right()` come from text patterns on review comments, and each was confirmed here by reading the comments (entries C7.6 to C7.8). The category counts rest on one reader's judgement of each paper.
+
+```{r}
+#| results: asis
+num_table("3. Can the archived data/code be located, downloaded and opened?")
+```
+
+## Definitions of the columns
+
+The only computed numbers here concern licence strings on Dryad. *Provenance.* `repo_check$repo_metadata`, reduced to one row per repository. *Formula.* Counts of repositories whose address is on Dryad and whose licence is the CC0 address. *Interpretation.* The count is by distinct repository (1058), whereas the raw table holds 1061 rows, because a repository cited by two papers has two rows.
+
+## Data availability, licences and README (sections 5 and 6)
+
+*Definition.* The confusion table of each comparison, from `compute_comparison_statistics()`: TP is Cooper "Yes" and Metacheck TRUE, FN is Cooper "Yes" and Metacheck FALSE, FP is Cooper "No" and Metacheck TRUE, TN is Cooper "No" and Metacheck FALSE. *Formula.* Agreement is the share of papers where both sides have an answer and the answers match; the review verdicts (manual coding correct, automatic coding correct, different definition, both defensible, both wrong) come from `data/review/disagreement_review_data.xlsx`. *Provenance of the causes.* `cooper_right_causes` assigns a review comment to the first matching group of text patterns (`categorize_disagreement_causes()`), so 175 and 96 are counts of wording, not of causes coded one by one. To test this, the 175 papers were matched to the audit of section 1: 122 of them are there classified as on a platform Metacheck does not support, which supports the manuscript's description in this section but contradicts the Discussion (entry C17.2). *Interpretation.* The agreement values and verdict counts measure agreement with the coders and the result of a by-hand review of each disagreement, not correctness by definition; the review found the coders wrong in many disagreements (for licences, the automatic coding was judged correct in 46 of 57). The numbers for these sections, including Table 4's columns, are listed under their manuscript headings in the completeness table below.
+
+## Discussion
+
+These numbers repeat values defined above. The value 63.0% divides the 294 papers classed as a difference of definition by all 467 README disagreements. The value 21 counts rows with the reason "coders coded no code, but the repository holds the authors' code".
+
+```{r}
+#| results: asis
+num_table("Discussion")
+```
+
+## Section at the end of the manuscript headed LEFTOVERS
+
+These numbers belong to text that is marked as left over and is not part of the argument. They come from the same files as sections 2 and 3. They are recomputed so that they are correct if the text is used again.
+
+```{r}
+#| results: asis
+num_table("LEFTOVERS")
+```
+
+## Every other computed number, by manuscript heading
+
+Every computed number in the manuscript that was not already shown under one of the headings above appears here, grouped by its current manuscript heading, so that no number escapes this audit when a heading is renamed or a section is added or removed. This includes the per-construct comparison numbers of sections 5 and 6 and the columns of Table 4.
+
+```{r}
+#| results: asis
+remaining_tables()
+```
+
+## Numbers typed into the text
+
+```{r}
+#| label: typed-numbers
+#| results: asis
+
+coop <- ind$cod
+app <- paste(readLines("documentation/appendix.qmd", warn = FALSE, encoding = "UTF-8"), collapse = " ")
+in_app <- function(p) if (grepl(p, app, perl = TRUE)) "Found in the appendix" else "**Not in the appendix**"
+pct <- function(a, b) sprintf("%.0f%%", 100 * a / b)
+yes_arch <- trimws(unlist(strsplit(coop$data_archive[coop$data_availability %in% "Yes" & !is.na(coop$data_archive)], ";")))
+arch_d <- coop$data_availability %in% "Yes"
+arch_c <- coop$code_archived %in% "Yes"
+rv_ <- function(tally, verdict) { n <- unname(tally[verdict]); if (is.na(n)) 0L else n }
+# Each row: the words searched for in the manuscript (outside code), the number as
+# stated, and the value recomputed here. The line is found again at every render.
+where_now <- function(p) {
+  hit <- which(!in_chunk & grepl(p, manuscript, fixed = TRUE))
+  if (length(hit)) paste(ifelse(hit <= yaml_end, "Abstract", paste("Line", hit)), collapse = ", ") else "**No longer in the text**"
+}
+typed <- list(
+  c("1861 papers", "1861 papers", nrow(coop)),
+  c("145 participants", "145 participants", length(unique(coop$recorder_ID))),
+  c("seven British Ecological Society journals", "seven journals", length(unique(coop$journal))),
+  c("between 2017 and 2024", "from 2017 to 2024", paste(range(coop$year_published), collapse = " to ")),
+  c("85.5% on", "85.5%, data available in a repository", sprintf("%.1f%%", ind$results$data_availability$pct_agree)),
+  c("87.9% on", "87.9%, code archived", sprintf("%.1f%%", ind$results$code_archived$pct_agree)),
+  c("95.7% on", "95.7%, data licence", sprintf("%.1f%%", ind$results$data_license$pct_agree)),
+  c("72.9% on", "72.9%, README", sprintf("%.1f%%", ind$results$any_readme$pct_agree)),
+  c("above 99%", "above 99%, data and code downloads", sprintf("%.1f%% and %.1f%%", ind$results$data_download$pct_agree, ind$results$code_download$pct_agree)),
+  c("About two in five", "about two in five of the papers Metacheck missed were not machine-retrievable",
+    sprintf("%d of %d (%.0f%%)", ind$n_not_fair_total, ind$n_cooper_yes_mc_no, 100 * ind$n_not_fair_total / ind$n_cooper_yes_mc_no)),
+  c("most disagreements reflect", "most README disagreements: a difference in definition",
+    sprintf("%d of %d", rv_(ind$verdict_tallies$any_readme, "DIFFERENT_DEFINITION"), ind$results$any_readme$n_disagree)),
+  c("46 of 57", "licences: automatic coding correct in 46 of 57",
+    sprintf("%d of %d", rv_(ind$verdict_tallies$data_license, "METACHECK_RIGHT"), ind$results$data_license$n_disagree)),
+  c("code of 435", "the code of 435 papers was run", ind$n_rc_papers),
+  c("21.8% of 2874", "21.8% of 2874 scripts ran without an error", sprintf("%.1f%% of %d", 100 * ind$n_rc_ok / ind$n_rc_scripts, ind$n_rc_scripts)),
+  c("(n = 1735)", "93% (n = 1735) used data", paste(pct(sum(coop$data_used == "Yes"), nrow(coop)), sum(coop$data_used == "Yes"))),
+  c("(n = 1670)", "90% (n = 1670) used code", paste(pct(sum(coop$code_used == "Yes"), nrow(coop)), sum(coop$code_used == "Yes"))),
+  c("(n = 1690)", "97% (n = 1690) archived data", paste(pct(sum(arch_d), 1735), sum(arch_d))),
+  c("(n = 577)", "35% (n = 577) archived code", paste(pct(sum(arch_c), 1670), sum(arch_c))),
+  c("n = 1022", "Dryad 57%, n = 1022", paste(pct(sum(yes_arch == "Dryad"), length(yes_arch)), sum(yes_arch == "Dryad"))),
+  c("Figshare (9%)", "Figshare 9%", pct(sum(yes_arch == "Figshare"), length(yes_arch))),
+  c("Zenodo (12%)", "Zenodo 12%", pct(sum(yes_arch == "Zenodo"), length(yes_arch))),
+  c("(17%)", "institutional and government 17%", pct(sum(yes_arch == "Other repo/database"), length(yes_arch))),
+  c("97% could", "97% could be accessed by the link", pct(sum(coop$data_link %in% "Yes"), 1690)),
+  c("95% could", "95% could be downloaded", pct(sum(coop$data_download %in% c("Yes", "Yes, but not all data")), 1690)),
+  c("91% could", "91% could be opened", pct(sum(coop$data_open %in% c("Yes", "Yes, but not all files")), 1690)),
+  c("(n = 1114)", "66% (n = 1114) README for data", { k <- sum(coop$data_README %in% c("Yes", "Quasi-README") & arch_d); paste(pct(k, 1690), k) }),
+  c("(n = 351)", "61% (n = 351) README for code", { k <- sum(coop$code_README %in% c("Yes", "Quasi-README") & arch_c); paste(pct(k, 577), k) }),
+  c("(n = 1543)", "91% (n = 1543) of archived data had a DOI", { k <- sum(arch_d & coop$data_doi %in% c("Yes", "Yes, but not for all data archived")); paste(pct(k, 1690), k) }),
+  c("(n = 1438)", "85% (n = 1438) of archived data had a licence", { k <- sum(arch_d & coop$data_license %in% c("Yes", "Yes, but not for all data archived")); paste(pct(k, 1690), k) }),
+  c("(n = 1076)", "CC0 (n = 1076) for data", sum(arch_d & coop$data_license_type %in% "CC0")),
+  c("(n = 457)", "79% (n = 457) of archived code had a DOI", { k <- sum(arch_c & coop$code_doi %in% c("Yes", "Yes, same as data")); paste(pct(k, 577), k) }),
+  c("(n = 428)", "74% (n = 428) of archived code had a licence", { k <- sum(arch_c & coop$code_license %in% "Yes"); paste(pct(k, 577), k) }),
+  c("(n = 122)", "CC BY (n = 122) for code", sum(arch_c & coop$code_license_type %in% "CC BY")),
+  c("(n = 104)", "CC0 (n = 104) for code", sum(arch_c & coop$code_license_type %in% "CC0")),
+  c("Handle", "4 Handle links, 3 Figshare, 1 Arctic, 2 archives", "Read in the audit rows: entry C5.15"),
+  c("over 90%", "over 90% of 66 repositories", "COAR report: entry C5.8")
+)
+typed <- as.data.frame(do.call(rbind, typed))
+typed <- data.frame(Where = vapply(typed[[1]], where_now, ""), `As stated` = typed[[2]], `Recomputed or found` = typed[[3]], check.names = FALSE)
+typed[2:3] <- lapply(typed[2:3], esc)
+md_table(typed, c(16, 40, 40))
+```
+
+The column "Where" is found again at every render, by searching the manuscript for the number. On 10 November 2026, eleven typed numbers that this table listed on 1 November were no longer in the manuscript, because the sentences holding them had been removed (the earlier history of defects in the Discussion, the abstract's estimates of 24 minutes and 2 to 25 hours, and the account of the 16 repositories and the 38 flagged repositories); they are no longer listed. The value 543, the number of papers rated on annotation, is now computed in the text and so appears in Part 1. The recomputed percentages are rounded to whole numbers, as in Cooper et al.'s text. All values Cooper et al. report that were tested here follow from their public file, with two points worth noting. Their 57% for Dryad and the percentages beside it are shares of the 1782 platform labels on the 1670 papers with a coded platform, not shares of papers. Their 61% for README on code counts only papers coded as archiving code; without that restriction the count would be 353.
+
+Typed numbers that are not quantities (such as "Appendix A.5", "version 0.3.3.9" or "the two sides") were not listed. Typed numbers that describe facts about the project, such as "Twelve" defects and "seven" fixes, are treated as statements in Part 2 (entries C18.1 and C18.5).
+
+# Part 2: Register of factual statements
+
+The entries follow the order of the manuscript as it was on 1 November 2026. Quotations give the words tested, and line numbers refer to `documentation/manuscript.qmd` as it was then. The current line of each quotation, and whether the entry has since been resolved, are given in the tables of the Summary of results. Cooper et al. (2026) was read in the published version, from the open copy in the NERC Open Research Archive (<https://nora.nerc.ac.uk/id/eprint/541841/1/N541841JA.pdf>). Where an entry says "the protocol", it means their Supporting Information A, `documentation/cooper_supplement_documentation.pdf`.
+
+## Title page and abstract
+
+**C1.1 — QUALIFIED.** Line 36: "even the lightest form of computational reproducibility checking ... has been estimated to take around 24 minutes per article, and writing independent analysis code from scratch has been estimated at 2-25 person-hours per article." Both figures can be traced: 24 minutes is the mean time reported by Obels et al. (2020) for registered reports in psychology, and 2 to 25 person-hours is an estimate from Hardwicke et al. (2018) as cited there. The Sage page refused automated access, so this rests on a search result quoting the article, not on a reading of it. The abstract gives no citation, although `obels2020` is in `references.bib`. **Correction:** cite both, and state that 24 minutes refers to psychology papers whose code ran. "Lightest form" is a judgement of the authors.
+
+**C1.2 — TRUE.** Line 36: Cooper et al. "manually coded data- and code-archiving practices in 1861 papers published across the seven British Ecological Society (BES) journals between 2017 and 2024". Their abstract says the same, and the public file has 1861 rows, seven journals and years 2017 to 2024. The 1861 are about 20% of the 8112 eligible papers (Cooper et al., p. 1958), which the manuscript does not mention and could.
+
+**C1.3 — TRUE.** Line 36: "a two-day hackathon of 145 participants who followed a bespoke coding protocol". Cooper et al., p. 1956: "a hackathon event (29-30th September 2025), where 145 (in-person and online) participants ... followed a bespoke protocol". Column `recorder_ID` has 145 values. The protocol allowed work outside these two days, and one ID can be a group: "each unique data recorder, or group of data recorders, was given a recorder ID number". "145 participants" is therefore Cooper et al.'s number, whereas line 328's "145 people coded" should read "145 recorders" (see C2.19).
+
+**C1.4 — JUDGEMENT.** Line 36: tools extract this information "in a fraction of the time". No comparison of time is reported. Metacheck's run took many hours, and the coders' total time is not recorded. The claim is plausible but has no measurement behind it.
+
+**C1.5 — TRUE.** Line 36: "We ran Metacheck's `repo_check`, `data_check`, and `code_check` modules on the same corpus". The results file holds all three for 1861 papers, with no errors recorded (`errors` has no rows). `code/run_metacheck.R` also runs three further modules.
+
+**C1.6 — TRUE.** Line 36: compared "for every construct where a direct, mechanical comparison is possible: data availability, archive location, data licensing, data and code download success, code archiving, and README presence". These are the eight entries of `results`. File format (`mc_data_format`) and language (`mc_code_language`) could also be compared mechanically and are not, so "every" is slightly too strong. No change is needed unless a reader asks.
+
+**C1.7 — QUALIFIED.** Line 36: "For each construct we report sensitivity, specificity, and two directional miss rates". The summary table does so for six constructs. For archive location it leaves these columns empty, because the comparison there is of sets. **Correction:** "for each construct with a yes or no answer".
+
+**C1.8 — QUALIFIED.** Line 36: "we individually reviewed every disagreeing paper against Metacheck's saved output, the paper's own text, and, where relevant, a live call to the repository platform's own API". All 876 rows carry verdicts on every disagreeing column. However, of 1216 verdicts, only 21 are stamped with the version of the final run. The others were written against earlier versions and carried forward when both answers stayed the same (see C9.7). The reader should know that "saved output" often means the output of an earlier run.
+
+**C1.9 — TRUE.** Line 36: the five agreement percentages, 99.2, 99.8, 85.5, 87.9 and 72.9. These are typed by hand and match the computed values (Part 1). One caution: "whether data could be downloaded and used" at 99.2% is limited to papers where Metacheck saved a data file. Over all papers the coders downloaded, it is 83.6%, as line 801 reports. An abstract that gives only the first figure flatters the tool. **Suggested addition:** give both.
+
+**C1.10 — QUALIFIED.** Line 36: "Metacheck's precision is consistently high across constructs". Positive predictive value is above 96% for five constructs and 91.9% for code archiving, as the manuscript itself reports at line 1021. "Consistently" should be "high for five of six constructs". Precision here means agreement with the coders.
+
+**C1.11 — TRUE.** Line 36: recall is driven by "at least one genuine definitional mismatch (platform-level description metadata a human coder reasonably reads as README-equivalent, which Metacheck's stricter file-presence check does not)". This agrees with Cooper et al.'s question and, since the reclassification of 1 November 2026, with the body of the manuscript (C12.4, C12.9). The 294 such papers count as misses in the sensitivity of 64.2%.
+
+**C1.12 — TRUE.** Line 36: the causes of low recall include "a real, working data or code citation on a platform or in a format Metacheck does not yet recognise" and "data or code shared in a form that does not identify it as data or code". The audit supports both: 101 papers on unsupported FAIR platforms and 26 with files not classified.
+
+**C1.13 — JUDGEMENT.** Line 36: "Our goal is not to replace manual coding". This is a statement of intent.
+
+**C1.14 — QUALIFIED.** Line 20: "A reproducible version of this manuscript is available at https://github.com/Lakens/cooper-bes-validation." That repository exists and is public, but it is the earlier one. The final repository is `Lakens/bes_validation`, which is private at the time of checking. **Correction:** change the address and make the repository public at submission.
+
+**C1.15 — QUALIFIED.** Line 19: "The author has no conflict of interest to declare." The manuscript evaluates Metacheck, and the author is one of its four named authors (`R-metacheck` in `package_citations.bib`). This is not a financial conflict, as far as can be seen from the repository, but a reader would want to know. **Correction:** declare that the author is a developer of the tool.
+
+## Introduction
+
+**C2.1 — JUDGEMENT.** Line 322: "The last two decades has seen a notable culture change around open science practices. Universities, journals, and funders increasingly expect researchers to engage in open science practices." No citation is given. It is a widely held view but should be supported with a reference. The verb should be "have seen".
+
+**C2.2 — JUDGEMENT.** Line 322: "One open science practice that has become especially widely required is data and code sharing. The goal ... is to facilitate re-use, and to increase transparency." No citation is given. Cooper et al. (p. 1955) describes the same goals and can be cited.
+
+**C2.3 — UNVERIFIED.** Line 322: "Funders have started to require data management plans ... and submission guidelines for journals often require that data and code ... are shared if possible." This is common knowledge in the field, but no source is given and none was checked here. A citation of one funder's policy and one journal policy study would settle it. **Author's decision (10 November 2026):** the general statement is true, but no scoping review covers the requirements of both funders and journals over the last 20 years. Any citation would be more specific than the claim and would not fully support it, so the sentence is kept without a citation.
+
+**C2.4 — UNVERIFIED.** Line 322: the quotation from the BES author guidelines, "all data and code supporting the results in the paper must be archived in a public repository". The page refused automated access (HTTP 403), and a search found no copy of this sentence. The policy described by Cooper et al. (p. 1955) is narrower for code: data archiving has been mandatory "at all seven journals since January 2014", and "code-archiving has been required for papers presenting simulations, new applications and non-standard analyses since 2017 (2015 for MEE)". **To settle:** open the page in a browser and compare the sentence, including whether the rule has changed since the corpus years. If it has, note that the corpus was published under the narrower rule.
+
+**C2.5 — QUALIFIED.** Line 324: "it is less clear who is responsible to check that authors actually follow through". Cooper et al. (p. 1955) states that "journal staff check each accepted paper to ensure authors have archived data and code according to BES editorial policies", but "do not have the skills or capacity to guarantee" completeness and reusability. The manuscript's sentence is fair for quality but too strong for presence. **Correction:** cite that passage.
+
+**C2.6 — JUDGEMENT.** Line 324: "Manually checking data and code files is a time-consuming task that requires expertise". This agrees with Cooper et al. on skills, and with Obels et al. on time.
+
+**C2.7 — FALSE.** Line 324: "Due to the diffusion of responsibility and the lack of resources ... requirements to share data and code are often not followed". Two parts fail. For data, Cooper et al. found the reverse, 97% archived (p. 1958), and describes "high compliance". And no evidence in the manuscript or cited work shows the cause, diffusion of responsibility. The sentence is true for code (35%). **Correction:** "requirements to share code are often not followed, and shared data and code often do not follow best practices", and drop the causal phrase or mark it as a suggestion.
+
+**C2.8 — TRUE.** Line 324: Cooper et al. "assessed data- and code-archiving practices across the seven journals", and "most manuscripts in which data was used also shared the data, but code sharing was less common". The figures are 97% and 35% (p. 1958).
+
+**C2.9 — TRUE.** Line 324: "About a third of data and/or code repositories lacked a README file". Cooper et al., p. 1961: "around a third of papers lacked a README or similar". The manuscript's review shows many of Cooper et al.'s READMEs are not files, so the true share lacking a file is larger.
+
+**C2.10 — QUALIFIED.** Line 324: "code not always well-annotated". The median annotation score is 7 of 10, range 1 to 10 (p. 1960), so the statement is true. Cooper et al. warns that this variable was "less consistent among data recorders" (p. 1958). The sentence lacks a verb ("code was not always").
+
+**C2.11 — FALSE.** Line 324: they "found that ... code was not always reproducible (e.g., due to hard-coded file paths)". Cooper et al. did not test this. They did not run code, and they say of completeness that it is "not verified reproducibility" (p. 1960). Hard-coded paths appear only as a possibility in their Discussion: "other factors are likely to impact the ability to reuse code, such as hard-coded paths" (p. 1961). The term does not occur in the protocol or in the coders' comments. **Correction:** "They note that other factors, such as hard-coded paths, are likely to limit reuse."
+
+**C2.12 — JUDGEMENT.** Line 324: "These findings strongly suggest that it would be beneficial if data and code is reviewed before a manuscript is published." Cooper et al. makes the same recommendation (data and code editors), which can be cited.
+
+**C2.13 — QUALIFIED.** Line 326: "Some journals manually check data and code before an article is published. This practice is most common in economics journals, where a dedicated Data Editor oversees the reproduction of results". The American Economic Association's process is confirmed: since 2019 its Data Editor's team reviews conditionally accepted papers at eight journals (<https://news.cornell.edu/node/313496>). The report cited (Vilhuber and Cavanagh, 2025) could not be opened automatically. "Most common in economics" is a comparison across fields, for which no source was found. **Correction:** "This practice is well established in economics" unless a comparison is cited.
+
+**C2.14 — JUDGEMENT.** Line 326: "Manual checks are laborious and delay the publication process." The first part is supported by the scale of that work. The second has no citation.
+
+**C2.15 — QUALIFIED.** Line 326: SIVACOR is "the Scalable Infrastructure for Validation of Computational Social Science Research ... pilot project by the data editors of the American Economic Association" that "examines whether it is possible to automatically verify". The name is confirmed by Lars Vilhuber's talk page (<https://lars.vilhuber.com/talks/2026-04-29-worldbank/>), which describes a framework that lets users "confirm and demonstrate reproducible analysis". Vilhuber is the Association's Data Editor. The page says neither "pilot" nor that the Association's editors run it, and it has no citation in the manuscript. **Correction:** cite the page and write "a project led by the Data Editor of the American Economic Association", after confirming with the source.
+
+**C2.16 — JUDGEMENT.** Line 326: "The extent to which automated processes can reduce the workload ... is an open question."
+
+**C2.17 — TRUE.** Line 328: Metacheck is "a novel open source tool". The source is public at `scienceverse/metacheck`, and "checks best practices" matches the package's description.
+
+**C2.18 — TRUE.** Line 328: Cooper et al.'s data are available at the GitHub address given, `nhcooper123/reproduce-reuse-recycle`. The repository exists and holds them, and the article cites the same address and the Zenodo record.
+
+**C2.19 — TRUE.** Line 328: "145 people coded a median of 10 (min = 1, max = 68) manuscripts". The numbers follow from `recorder_ID`, except that a recorder ID may be a pair (C1.3). **Correction:** "145 recorders".
+
+**C2.20 — JUDGEMENT.** Line 328: "the human coders exerted considerable effort".
+
+**C2.21 — QUALIFIED.** Line 328: "coding papers published between 2017 and 2024 on eight questions per paper". Cooper et al. (p. 1956) has eight numbered headings, but says: "Rather than list each question in our protocol ... we have grouped questions thematically". The form has many more questions. **Correction:** "eight groups of questions", also at lines 330 and 332.
+
+**C2.22 — TRUE.** Line 328: the list of what was coded, from use and archiving to DOI and licence, matches headings 1 to 8 on pp. 1956-1957.
+
+**C2.23 — JUDGEMENT.** Line 330: a tool at comparable accuracy "would substantially reduce the workload".
+
+**C2.24 — FALSE.** Line 330: "their trained human coders". Cooper et al. does not report any training. Participants "randomly selected papers" and "followed a bespoke protocol", with a chat channel for questions (p. 1956), and the protocol shows volunteers working from instructions. **Correction:** "their human coders", also at line 1031.
+
+**C2.25 — TRUE.** Line 330: Metacheck "uses text search, rule-based classification, API's, and optional large language models". The package has all of these (`llm()`, `llm_use()`). The plural should be "APIs".
+
+**C2.26 — JUDGEMENT.** Line 330: the three modules "closely resemble the classifications that Cooper et al. asked their human coders to perform". It is true for presence, location, download and README, but not for licence scoping or for usefulness.
+
+**C2.27 — FALSE.** Line 332: "for each of the eight questions in their protocol, we summarize what Cooper et al. found, and examine whether that question can currently be automated". The manuscript's numbered sections stop at question 3, and later sections treat data availability, licences (part of question 8), README (question 5) and annotation (question 7). Questions 4 (file extensions) and 6 (completeness) are not examined, and DOI (question 8) is not reported. **Correction:** either add file formats and DOI, which Metacheck's columns allow, or write "for the questions that can be compared". Lines 858 and 1023 already say that some have no counterpart.
+
+**C2.28 — QUALIFIED.** Line 332: "we use Cooper et al.'s openly archived data as ground truth". The citation is correct. But the manuscript itself shows the coders were wrong in many disagreements, and Cooper et al. reports 91.7% mean recorder agreement (p. 1958). The phrase "ground truth" (also lines 862, 984, 990, 1023) conflicts with those findings. **Suggested wording:** "as the reference".
+
+**C2.29 — QUALIFIED.** Line 332: "The results generated by Metacheck are completely automated, do not rely on AI, and can be reproduced by re-running the code, without any human input." "Do not rely on AI" holds: `code/run_metacheck.R` never enables a language model. "Without human input" is too strong: the run has settings chosen by hand (higher download budgets for two papers, one paper excluded on the author's decision), and needs keys and Docker. Re-running also depends on live repositories, and 191 papers were rerun after failures such as HTTP 429 (Appendix A.8), so identical results cannot be promised. The verdicts, audits and categories are human or AI judgements, as stated elsewhere. **Correction:** "the module results are produced without a language model and without judgement per paper; they depend on the repositories' state at the time."
+
+**C2.30 — JUDGEMENT.** Line 332: "Unlike a validation study that reports a single accuracy percentage, our goal here is ...".
+
+**C2.31 — QUALIFIED.** Line 334: "Metacheck follows FAIR principles, which state that 'all research objects should be Findable, Accessible, Interoperable and Reusable (FAIR) both for machines and for people' [p. 3]." The quotation and page are correct (Wilkinson et al., 2016, PDF page 3). But that sentence reports the conclusion of the meeting that led to the principles, and it does not state the principles. A tool also does not "follow" them; it uses data shared according to them. **Correction:** "Metacheck relies on data and code being shared according to the FAIR principles, the idea being that ...".
+
+**C2.32 — QUALIFIED.** Line 334: "if authors state that the data is shared in a PDF file shared as supplementary material the data is not FAIR, because a machine can't find or access the datafile". The conclusion is the manuscript's definition and is reasonable. The reason is too strong: a supplementary file usually has an address. What fails is that a table in a PDF is not machine-readable and carries no persistent identifier of its own. **Correction:** state these two reasons.
+
+**C2.33 — TRUE.** Line 334: "Cooper and colleagues did not limit their coding to FAIR data". The protocol counts data "mentioned in the data availability statement, or supplementary materials", and 23 papers have that label.
+
+**C2.34 — TRUE.** Line 334: "Metacheck will always miss some information that human coders found", as a consequence of C2.33. In the audit, 115 papers fall here.
+
+**C2.35 — TRUE.** Line 334: "the Dryad data repository requires a CC0-1.0 license at deposit for every dataset with no author choice involved". Dryad's requirements page says: "Dryad does not accept any files with licensing terms that are incompatible with the Creative Commons Zero waiver", and refers to "the CC0 license waiver required for publication" (<https://datadryad.org/requirements>). The only choice offered is hosting software on Zenodo.
+
+**C2.36 — FALSE.** Line 334: "Metacheck retrieves this information, but the human coders were unable to locate license information by visually examining the Dryad repository." The coders mostly did find it. Among papers where Metacheck names Dryad as a data platform, Cooper et al. coded a licence as "Yes" in 922, "No" in 27, "Unsure" in 6, and left 37 blank. Cooper et al. reports CC0 for 1076 papers and calls it "the licence used by Dryad" (p. 1960). **Root:** a generalisation from the disagreements, which are the only cases reviewed. **Correction:** "In 46 papers coders recorded no licence where the repository's metadata has one, in 26 of which the comment names Dryad."
+
+## Methods
+
+**C3.1 — QUALIFIED.** Line 338: "We obtained the list of paper DOIs, journals, and years directly from the cleaned dataset". True, except that four DOIs in the dataset are wrong and were corrected (`cooper_doi_corrections()`). The independent join on paper number gives the same mapping for all 1861 rows, which confirms the correction. **Correction:** mention it.
+
+**C3.2 — QUALIFIED.** Line 338: "downloaded all articles through an R script". This script is not in the repository, and `data/bes.rds` is kept private for copyright reasons. Column `source` of `data/papers_data.csv` records downloads from Europe PMC and through a Wiley proxy. At least one paper's text is the PubMed Central author manuscript (10.1111/1365-2656.12794), which lacks the data section, so "all articles" were not all in the published form. **Correction:** say where the texts came from, and either add the script or say it is not shared.
+
+**C3.3 — FALSE.** Line 338: "using GROBID 9.0". All 1861 papers carry `input_format` "grobid 0.9.0". **Root:** a typing error. **Correction:** "GROBID 0.9.0".
+
+**C3.4 — TRUE.** Line 338: the descriptions of `repo_check`, `data_check` and `code_check`, including that `code_check` "checks R, Python, SAS, SPSS, Stata, Mplus, and MATLAB code files". This repeats the module's documentation (`code_check.R`, line 7, and `listed_langs`). In this corpus only R, Python, MATLAB and Mplus files occur; Cooper et al.'s coded languages also list no Stata, SAS or SPSS. "To mirror to manual coding" should read "to mirror the manual coding".
+
+**C3.5 — QUALIFIED.** Line 338: "we ran the `reproducibility_check` module to illustrate additional benefits of automation". The module was run (`repro_*` columns), but the main text no longer reports it; it is in Appendix A.7. **Correction:** add "(see the Appendix)".
+
+## Section 1: use and archiving
+
+**C4.1 — TRUE.** Line 595: the quotation beginning "Of the 1861 papers in our dataset". It is verbatim from Cooper et al., p. 1958 (apart from spaces around the equals signs), and the manuscript gives no page. **Correction:** add the page.
+
+**C4.2 — TRUE.** Line 595: "The first two percentages are based on text in data availability statements and the method section." Cooper et al., p. 1956: "We used the Data Availability statement to determine whether data were used and archived", and for code "we read the Methods section".
+
+**C4.3 — TRUE.** Line 595: "There are tools that automatically check data availability statements, such as OddPub". OddPub reads a paper's text for data and code sharing (Riedel et al., 2020). It searches the full text, not only the statement.
+
+**C4.4 — TRUE.** Line 595: `open_practices` "reads the full text and judges from the wording alone". Its code is a set of text patterns over the paper (`open_practices.R`). "Equivalent" is fair in purpose.
+
+**C4.5 — JUDGEMENT.** Line 595: "These automated checks most closely follow the coding by Cooper and colleagues".
+
+**C4.6 — TRUE.** Line 595: `repo_check` "classifies data and code as available based on a linked repository that can be automatically accessed through an API". This is correct in substance. Data and code classification itself is done by `data_check` and `code_check`.
+
+**C4.7 — QUALIFIED.** Line 599: "The Metacheck Open Practices module does the same, but is intentionally over-inclusive". The module's documentation says "a lower false negative rate, but also a higher false positive rate" than ODDPub, and the patterns are broad. The results agree: sensitivity 86% against 80%, specificity 9% against 45%. The word "intentionally" is an inference. The module's author could confirm it.
+
+**C4.8 — TRUE.** Line 599: the description of the comparison: "Yes" (and for data "Yes, but not all files") as open, and ambiguous or blank answers excluded. It matches `build_master_comparison()`. Also true: "`data_open`/`code_open` were only asked for papers Cooper and colleagues had already coded as archiving". In the file every non-blank `data_open` has `data_availability` "Yes".
+
+**C4.9 — TRUE.** Line 599: `open_practices` has "higher sensitivity ... but lower specificity" than OddPub for data, and "the difference was larger" for code. Accuracy differs by 6 points for data and 33 for code.
+
+**C4.10 — FALSE.** Line 599: "Both tools, in other words, are much more likely to say a paper shares open data or code than to say it does not". It holds for data (80% and 86% say open) and for `open_practices` on code among the rated papers (77%). It fails for OddPub on code: among the 498 rated papers it says open for 44%, and over the whole corpus 15%. Over the corpus `open_practices` says open code for 40%. **Root:** a generalisation from the data results. **Correction:** "For data, both tools say open for most papers. For code, `open_practices` does so for 77% of the rated papers and OddPub for 44%."
+
+**C4.11 — TRUE.** Line 599: "very few papers the human coders judged as clearly *not* sharing (11 for data, 3 for code), so the specificity estimates ... should be treated as indicative". The numbers are correct. With 3 papers the estimates are not even indicative.
+
+**C4.12 — QUALIFIED.** Line 599: "neither distinguishes between data and code repositories". Both give separate answers for data and for code, from the wording, so a reader could misread this. They do not inspect repositories at all. **Correction:** "neither inspects a repository".
+
+**C4.13 — TRUE.** Line 601: "OddPub and `open_practices` classify every paper". Neither column has a missing value. The later counts are verified in Part 1, and their labels match the file ("Needs specific software or too large", "Maybe if I had the right software").
+
+**C4.14 — FALSE.** Line 605: "in total, 1789 papers contain a link to a repository with either data or code." 1789 is the number of papers coded as sharing data or code, and not all give a repository: the audit finds 18 with no repository cited, and 23 papers have the label "Supplementary materials". **Correction:** "in total, 1789 papers were coded as archiving data or code."
+
+**C4.15 — TRUE.** Line 605: "Metacheck found 1561 papers that contained a link to a repository in the main text where it could verify that the repository contained files." `files_n` above zero, and detection excludes the reference list (`include_refs = FALSE`).
+
+**C4.16 — QUALIFIED.** Line 605: "1487 papers contained data, 452 papers contained code, and 1532 papers contained either data or code according to `repo_check`". The numbers are right, but the classification comes from `data_check` and `code_check`. **Correction:** name them.
+
+**C4.17 — QUALIFIED.** Line 605: "17 papers where Metacheck found data or code while Cooper's coders missed it". The 17 is right, but "missed" is not established. Nine have no verdict at all, because the coders answered that the paper used no data, so that column was not compared. Of the others, two have a verdict that the coders were right on data availability, and one rests on another author's repository. **Correction:** "17 papers where Metacheck found files it classified as data or code while the coders recorded none."
+
+**C4.18 — TRUE.** Line 607: Metacheck supports "Dataverse, DSpace 6 and 7, Figshare, and DataOne, and dedicated support for OSF, Zenodo, ResearchBox, Dryad, ReShare, GitHub, GitLab, Mendeley Data, FSD, AsPredicted, and 4TU". Functions exist for each (for example `.rbox_info` for ResearchBox, `researchdata4tu_info` for 4TU).
+
+**C4.19 — FALSE.** Line 607: "Metacheck supports over 285 unique repositories (...76 Figshare-based hosts...)". The correct numbers are 41 Figshare-based hosts and 250 repositories. See the explanation in Part 1. "Over" is also wrong: the count is exact.
+
+**C4.20 — TRUE.** Line 607: "this is only a subset of all repositories used in manuscripts". 101 papers use FAIR repositories outside it.
+
+## Section 1: why Metacheck missed data or code
+
+**C5.1 — QUALIFIED.** Line 754: "We reviewed the 274 papers ... by checking the contents of the repository." Many have no repository to check (18), or one that is not reachable. Each was read by an AI agent, as the code comment in `full-317-audit-load` says; 227 rows state that they were then checked "by comparison, not by a full rerun". The manuscript's text never tells the reader that this review was made by AI agents, although line 797 says so for another review. **Correction:** state who or what performed it, because "we reviewed" suggests a human.
+
+**C5.2 — TRUE.** Line 754: "five reasons". The clusters are mutually exclusive and sum to 274, by a check in the chunk.
+
+**C5.3 — TRUE.** Line 754: "In 18 papers we found no reference to a repository ... either explicitly withheld for confidentiality, ethical, or Indigenous-data-sovereignty reasons, could not be shared for legal reasons, or were in shared in the paper or its supplemental material. Some ... offer ... upon request". All 18 comments were read, and these reasons all occur. "Were in shared" is a typing error.
+
+**C5.4 — QUALIFIED.** Line 754: these papers are counted among those where coders "found data or code". For withheld data, the coders' "Yes" is itself an error: several of these statements say the data are not available. Line 876 treats this group as errors by the coders. The group is therefore better described as "where the coders coded data or code as shared". This also affects the sentence on 1674 papers (C5.19).
+
+**C5.5 — QUALIFIED.** Line 754: "In 81 papers the citation or the repository did not meet basic FAIR requirements, so no automated tool could have retrieved the data." The count is right. "No automated tool" is too strong for a repository that blocks automated requests (7) or was temporarily not live (14). What the audit shows is that Metacheck could not, and that the repository does not offer machine access. **Correction:** "so that a tool using the repository's API cannot retrieve the data".
+
+**C5.6 — TRUE.** Line 754: the five subgroups (5 private links, 2 organisation pages, 7 blocks, 14 not live, 53 without an API). The counts follow from the audit file, and sample rows match their label (for example DIGITAL.CSIC blocking requests).
+
+**C5.7 — TRUE.** Line 754: "Automated access to repositories has become harder in recent years because of heavy scraping of files, which repository managers assume is mostly done by bots collecting training data". The report of the Confederation of Open Access Repositories says "the assumption in the community is that they are AI bots gathering data for generative AI training".
+
+**C5.8 — QUALIFIED.** Line 754: "In a 2025 survey, over 90% of responding repositories reported aggressive bot traffic, often causing slowdowns or outages, and many responded with rate limits and other blocks". The first parts are confirmed (<https://coar-repositories.org/news-updates/open-repositories-are-being-profoundly-impacted-by-ai-bots-and-other-crawlers-results-of-a-coar-survey/>). The survey has 66 responses, which the reader should be told. The summary page speaks of "a variety of measures" and of blocking machine access, and it does not name rate limits; the full report may. **Correction:** add "(66 responses)".
+
+**C5.9 — TRUE.** Line 754: "We observed this directly when attempting to download files". The audit has 7 papers with blocked repositories, and Appendix A.8 records HTTP 429 refusals during the corpus run. These refusals show access limits, not that bots were the cause.
+
+**C5.10 — TRUE.** Line 756: "In 101 papers data is shared on a repository that is FAIR, but Metacheck does not yet support". The examples named all occur in those rows: ScienceBase (13 rows), Environmental Data Initiative (15), NERC's data centre (10), PANGAEA (6), and none is in Metacheck's lists. FAIR status rests on the audit's agent judgement. A group not among the examples is NCBI's databases, mentioned in 18 rows. **Suggested addition:** name it.
+
+**C5.11 — QUALIFIED.** Line 756: these repositories "occur less frequently in the published literature". For one journal family, 101 papers is 6% of those with data or code, and no comparison with other platforms is made. The statement is plausible but unmeasured.
+
+**C5.12 — QUALIFIED.** Line 756: "We found 26 papers that shared data or code in a FAIR repository, but in a format Metacheck is not able to automatically classify". The count is right. The next sentence says 16 of them are in non-FAIR formats, so the clause should say "in a repository Metacheck supports".
+
+**C5.13 — FALSE.** Line 756: "drone photographs that are the measurement data in GeoTIFF files are classified as image material rather than data by Metacheck." The row in question (category `CLASSIFIER_MISTYPED`) reads: "64 .JPG drone photographs are the paper's primary measurement data". These are JPG files. GeoTIFF files are in fact treated as data when a GIS companion file lies beside them (`.is_geotiff()`, `data_classify_files()`). **Root:** two examples merged. **Correction:** "drone photographs in JPG files".
+
+**C5.14 — FALSE.** Line 756: "archives in `.rar` or `.7z` formats can't be opened by open source tools". 7-Zip is open source under the GNU LGPL and opens both ("free software with open source", <https://www.7-zip.org/>). Metacheck's own comment gives the actual reason: base R cannot read them. The review itself listed the contents of these archives. **Root:** a limit of base R stated as a limit of all tools. **Correction:** "Metacheck does not open archives in `.rar` or `.7z` format, because base R cannot read them. We recommend zip." Line 894 has a similar claim (C12.8).
+
+**C5.15 — TRUE.** Line 758: the 48 limitations and their parts: 30 in text conversion and 18 in code, of which 8 appear only in the reference list (5 by data citation, 3 by conversion). The remaining 10 are 4 Handle links (`dataverse.nl`, UNSWorks, two for dataSTORRE), 3 Figshare identifiers, 1 Arctic Data Center identifier (`urn:uuid`) and 2 archives. All 18 rows were read and agree. The four typed numbers are therefore correct, but they would not update if the file changes.
+
+**C5.16 — TRUE.** Line 758: "most often by inserting spaces into a DOI". Of the 24 rows, 22 mention spaces.
+
+**C5.17 — QUALIFIED.** Line 758: "GROBID failed to extract the data availability statement when this section followed the reference list (6)". Four of the six comments describe this. At least one other (10.1111/1365-2656.12794) has a different cause: the text is a PubMed Central author manuscript without that section. **Correction:** "GROBID's text lacked the data availability statement, usually because it followed the reference list".
+
+**C5.18 — TRUE.** Line 758: the reference list "which Metacheck does not search". The review comments record `include_refs = FALSE` for the detectors. The file paths named exist, except that the second file should also have `data/review/` before it. The statement that it is "difficult for a machine to identify which DOIs in a reference list point to the data" is a judgement and is reasonable; the recommendation is the author's.
+
+**C5.19 — QUALIFIED.** Line 766: "of the 1789 papers ... 1674 shared them following the FAIR principles, and Metacheck found the data or code in 1515 of these, or 90.5%." The arithmetic is correct. Three cautions apply. 1674 is a remainder, not a count: papers Metacheck found were not checked for FAIR sharing. 1515 counts a paper as found when Metacheck classified any file as data or code, even if another deposit than the coders', or another author's repository. And the 115 removed depend on the review of C5.1. **Correction:** say "at most 1674" and call the result an estimate.
+
+**C5.20 — JUDGEMENT.** Line 766: "Resolving technical limitations in text extraction from PDF files, and support for additional repositories would resolve the remaining discrepancies." The remaining 159 papers are 101 on other platforms, 48 limitations, and 10 unsupported formats, so unsupported formats should be added. Whether every one would resolve is a prediction.
+
+## Section 2: where data and code are archived
+
+**C6.1 — TRUE.** Line 770: "Cooper and colleagues coded the specific repository where data and/or code was stored." Heading 2 on p. 1956 and columns `data_archive` and `code_archive`.
+
+**C6.2 — QUALIFIED.** Line 770: "They observed that some papers linked to data that was shared in multiple repositories, such as GitHub as on Zenodo." Their stated observation is about code: "60% of code files that are hosted on GitHub or similar are also archived on Zenodo" (p. 1959). For data, the file also has more than one label per paper (1782 labels on 1670 papers), but the article does not remark on it. "As on" should be "and". **Correction:** "data or code".
+
+**C6.3 — TRUE.** Line 770: "Github is not a stable repository, while Zenodo is." Zenodo issues a persistent DOI for a fixed record. A GitHub repository can be changed or deleted: one in this corpus no longer exists (code category "GitHub repository named in the paper no longer exists"). Cooper et al. makes the same distinction, and notes that the BES policy "does not allow archiving at GitHub (or similar) alone" (p. 1959), which could be cited. The name is written "GitHub".
+
+**C6.4 — UNVERIFIED.** Line 770: "We observed this directly, as files in some GitHub repositories changed between our first run and the final run." Nothing in this repository records it. The 12 causes in `data/review/result_change_causes_data.csv` that explain differences between the earlier and the final results are all changes in Metacheck or settings, and none is a changed repository. **To settle:** compare the earlier and final file lists of the GitHub repositories, and confirm a change with the repository's commit history. Otherwise, use the deleted repository of C6.3 as the example.
+
+**C6.5 — QUALIFIED.** Line 770: "Cooper et al. report Dryad as the dominant data repository in ecology (57%, n = 1022), with Figshare (9%), Zenodo (12%), and 'various institutional and government repositories' (17%)", p. 1959. The numbers, quotation and page are correct. Two details differ: the study covers BES journals, not ecology, and the percentages are of "data files" in their words, in fact of the 1782 platform labels. **Correction:** "in these journals".
+
+**C6.6 — TRUE.** Line 772: the two sides code as stated. Cooper et al. codes data and code separately and allows several platforms; Metacheck "lists whether files in all repositories it finds contain data and/or code files". The mapping is in `repo_url_platform()`, and "Supplementary materials" and "Personal website" are not used by Metacheck.
+
+**C6.7 — QUALIFIED.** Line 772: "We then classify agreement (perfect, partial, or none)." The table has five categories: same platforms, Metacheck lists fewer, Metacheck lists more, each lists one the other lacks, no shared platform. **Correction:** name these.
+
+**C6.8 — FALSE.** Line 795: "Most of the differences are caused by the previously discussed limitations in the repositories that Metacheck supports. In 55 papers Metacheck missed a second repository coded as 'Other repo/database' ... cited alongside a Dryad deposit." Of the 137 differences for data, 52 are cases where Metacheck lists more, which is not a limitation of support. Of the 55 where it lists fewer, 38 involve "Other repo/database" and 27 of those also have Dryad. Others are Dryad with Zenodo (4) and GitHub with Zenodo (11), both supported platforms. **Root:** one frequent pattern was written up as the description of the whole group. **Correction:** "In 55 papers Metacheck lists fewer platforms than the coders. In 38 of these the platform it misses is 'Other repo/database', in 27 of them beside a Dryad deposit." Replace "Most of the differences" with a sentence that names both directions. To avoid new typed numbers, this should be computed.
+
+**C6.9 — QUALIFIED.** Line 797: "each of the 215 GitHub and GitLab repositories that Metacheck found, and it judged that 31 repositories in 28 papers". These count rows, each one paper with one address. There are 214 distinct addresses and 30 distinct third-party addresses, because one repository (`pgcorpus/gutenberg`) occurs for two papers. Some addresses are not repositories but pages inside one, such as an issue or a file. **Correction:** "215 links to GitHub and GitLab", "31 of these links".
+
+**C6.10 — TRUE.** Line 797: "Metacheck cannot yet differentiate between data or code that authors created and shared, and data or code that they reused, and it treats all files in repositories linked to in a manuscript as the paper's own". This is how the modules work. `repo_check` follows every address found, and the header of `third_party_repositories.R` says the same.
+
+**C6.11 — QUALIFIED.** Line 797: "Cooper and colleagues did not code this either." No column records it, so this is true for the file. But their definition restricts what counts: "A paper used data if it generated or collated a dataset essential for reproducing the main results", and "Some papers analysed only pre-existing datasets ..., so did not generate data" (p. 1956). The protocol says it wants data "generated as part of the project" as well as collations, and code "vital for reproducing the analyses". So coders were asked to exclude some reused material, without recording it. **Correction:** "Cooper and colleagues asked coders to count data the paper generated or collated, but did not record whether archived files were created by the authors."
+
+**C6.12 — QUALIFIED.** Line 797: "We asked Claude to examine each ... and it judged that ... contained data or code that was not generated by the authors". What was judged, according to `data/review/github_repository_ownership_review_data.csv`, is whether the repository's owner is an author or their group, against the Crossref author list. Files were not read for origin. An author can hold someone else's code, and a tool's owner can have written the paper under a different account. **Correction:** "whose owner is not an author of the paper or their group".
+
+**C6.13 — TRUE.** Line 797: "With one exception these hold software or scripts the authors used, not reused data; the exception is the repository of a text corpus, linked to by 2 papers." All 31 reasons in the file were read, and they agree. The corpus is the Standardized Project Gutenberg Corpus.
+
+**C6.14 — JUDGEMENT.** Line 797: "Authors can make re-use ... more transparent and automatically detectable by only using data citations for such repositories. There should not be a direct link ... in the main text." This is a recommendation. It is consistent with line 758, which recommends direct links for the authors' own data. It depends on tools not reading the reference list.
+
+## Section 3: locating, downloading and opening
+
+**C7.1 — TRUE.** Line 801: "of the 1735 papers ... 1690 archived the data, of which 97% could be accessed via the links provided in the data availability statement, 95% could be downloaded, and 91% could be opened", p. 1959. The numbers and page match, and the numbers also follow from the file (1633, 1600 and 1541 of 1690).
+
+**C7.2 — QUALIFIED.** Line 801: "for 253 of these papers Metacheck downloaded no data file at all, mostly because it did not find the repository (due to data not being FAIR, and due to the technical limitations discussed earlier)." Of the 253, 174 have no repository found, so "mostly" holds. In the other 79 a repository was found: 40 have no file classified as data, and 39 have such a file not saved. The parenthesis leaves out the largest cause: FAIR repositories on platforms Metacheck does not support. **Correction:** add it.
+
+**C7.3 — TRUE.** Line 801: "Counted over all 1600, Metacheck downloaded and could use the data in 1338 papers (83.6%)".
+
+**C7.4 — QUALIFIED.** Line 801: "For the 1349 papers where both Metacheck as the manual coders found data, agreement was 1338 (99.2%), and in 11 papers there was a disagreement." The numbers are right. The group is "both gave an answer": it includes two papers the coders could not download. "As" should be "and", and the sentence should read "agreement was on 1338 papers".
+
+**C7.5 — TRUE.** Line 803: "We resolved each of the 11 disagreements by downloading and opening the files. For 5 the manual coders were correct." All 11 comments carry the stamp of 15 October 2026 and record the files opened.
+
+**C7.6 — TRUE.** Line 803: "In 3 the data are space-separated tables, which Metacheck cannot read, and 1 of these also exceeds its 100 MB download limit." Comments for 10.1111/1365-2435.13647 and 10.1111/1365-2656.13337, and for 10.1111/2041-210X.13931, a 452 MB file. `max_file_size = 100` is the default in `data_check`.
+
+**C7.7 — TRUE.** Line 803: "In 1 the data are GeoTIFF and shapefile files inside a zip archive." 10.1111/2041-210X.13427; the comment lists the files and that they opened in R.
+
+**C7.8 — TRUE.** Line 803: "In 1 the data are in NCBI's Sequence Read Archive, a FAIR repository Metacheck does not support." 10.1111/1365-2664.14074. No NCBI host is in Metacheck's lists.
+
+**C7.9 — QUALIFIED.** Line 803: "In 6 Metacheck was correct", followed by three Excel files, an OSF project, a file with a reported download error, and Stan input files. Each description matches its comment. The OSF log confirms the project was made public on 13 January 2021. However, "correct" needs care for four of the six. For 10.1111/1365-2435.14140, 10.1111/1365-2656.13414, 10.1111/1365-2435.12969 and 10.1111/1365-2664.13982, the coders answered "Yes", and the comments confirm that the files download; those on the Excel files add that they open ("downloads and opens in Excel, as Cooper coded"). The coders' answer to their question, whether files can be downloaded, is therefore right. Metacheck's FALSE is right for a different question, whether a file is a usable table. **Root:** `mc_data_download` combines two conditions (see line 850), so "correct" measures the combination. **Correction:** "In four, the files download as the coders recorded, but they are not usable data tables, which is what Metacheck's answer requires. In two the coders' answer is wrong." Fix also "Ìn" and "not to raw data".
+
+**C7.10 — TRUE.** Line 805: the quotation "only 35% (n = 577) archived their code" is on p. 1958, and "most is on Zenodo or GitHub-family platforms" agrees with p. 1959 (39% and 24%).
+
+**C7.11 — TRUE.** Line 805: both sides gave an answer for 1669 papers, with agreement on 1467 (87.9%) and disagreement on 202 (12.1%).
+
+**C7.12 — TRUE.** Line 807: "Code downloads were codeable for 404 papers (which is the subset of papers where code was archived), and ... agree on 403 ... with 1 disagreement remaining." More exactly, it is the subset where both sides found code.
+
+**C7.13 — TRUE.** Section 3: "We investigated all 203 disagreements ... The manual coders were correct in 167 papers and Metacheck was correct in 34 papers, and in 2 papers both were wrong." The verdicts are 167, 33 and 2 for code archiving, plus 1 for code download. The review file holds a category and reason for all 203. These are one reader's judgement, based on listings and records rather than on every file; the Supporting Information group rests partly on the coders' record. Three rows were changed on 2 November 2026, see C7.16 and C7.17.
+
+**C7.14 — TRUE.** Line 831: "in 87 papers the code was not shared in a FAIR way" with its parts 34, 33, 8, 5, 4 and 3. All come from `code_category_reason`. The 34 Dryad cases were checked in the Dryad and Zenodo records on 1 November 2026, and the paper's own text and links were searched for the record's number. "We do not consider this FAIR" states the author's definition.
+
+**C7.15 — JUDGEMENT.** Line 831: the recommendation to state the DOI of the code deposit directly in the data availability statement.
+
+**C7.16 — TRUE.** Section 3: "In the remaining 82 papers the cause lies in earlier mentioned technical limitations of Metacheck", with 80 where the coders were correct and 2 where both were wrong, and parts 28, 26, 13, 7, 5 and 3. `scienceverse/metacheck#505` exists and is open. The 2 are 10.1111/1365-2664.14382 and 10.1111/1365-2656.13895. In each, the only file Metacheck counted as code is a `README.Rmd`, so its Yes is a false positive, and the authors' code is on Zenodo, linked only from the Dryad page, so the coders' No is also wrong. An earlier version of this document accepted them as Metacheck being correct, because that check compared only the final answers; the 20 other papers in that group were then checked and rest on real code files. One row among the 7 in "a language or file type" (10.1111/1365-2435.13735, with `Sapage_et_al_Simulation_code.zip`) is an archive rather than a language, as its comment says, so it could move to the group of 5. That does not change the total.
+
+**C7.17 — TRUE.** Section 3: "in 34 papers the manual coding was incorrect", with 21, 12, and 1. One of the 21 is 10.1111/1365-2435.13380, formerly classed as both answers being defensible. Its deposit holds a general solver (`MainScript.m`, `systeme_eqdif.m`, `runge_kutta4.m`) that takes any residency-time file and adjacency matrix. The paper's section on simulation describes the same inputs, the same uniform start, the same standardised density and the same equation (Prima et al., 2018). The code is therefore needed for this paper as well, which is an inference, because the paper does not name the scripts. Cooper et al. counts papers that "archived at least some code" (p. 1959). For the last of the 34: the coder's comment reads "The link to code and the data does not open"; the OSF API gives `made_public` on 11 January 2022 for project ng4zt, before the hackathon of September 2025; and 9 code files were saved. One odd detail, which does not affect the claim: the address in the extracted text is `http://10.0.68.197/OSF.IO/NG4ZT`, a private network address in place of `doi.org/10.17605`. Three papers in the corpus have such an address in their text, so the conversion or the download route altered them. It is recorded in the project's notes as not traced.
+
+## Definitions of the comparison columns
+
+**C8.1 — FALSE.** Lines 842, 850, 852, 874, 890, 1019: references to "Results below", "see Results", "the Coding section" and "see Coding section". The manuscript has no section with either name, and the paragraphs at lines 842 to 858 have no heading of their own: they follow the code passage directly. **Root:** the heading was removed when the code section was rewritten. **Correction:** give these paragraphs a heading, for example "How Metacheck's answers are defined", place them before the comparison, and change the references to this name.
+
+**C8.2 — TRUE.** Line 842: `mc_data_availability` is "TRUE if ... `files_n` is greater than zero", and it does not check `data_type`. This matches `recreate_cooper_columns()`.
+
+**C8.3 — QUALIFIED.** Line 844: "`datadryad.org` or the `10.5061/dryad` DOI prefix for Dryad; `figshare.com` or the `10.6084/m9.figshare` DOI prefix for Figshare; anything else is labelled 'Other repo/database.'" `repo_url_platform()` also recognises 14 Dryad DOI prefixes, and institutional Figshare hosts and prefixes. It also accepts "Other repo/database" for institutional Figshare in the comparison. **Correction:** mention both.
+
+**C8.4 — FALSE.** Line 846: `repo_metadata` is "populated only for the platforms whose API `repo_check` queries for metadata beyond the file listing itself (Zenodo, Dryad, Figshare, GitHub's repository object, and ... OSF)". In the final results, 58 repositories labelled "Other repo/database" have a licence, among them Mendeley Data, KNB, a DSpace repository at Cambridge and Harvard Dataverse. **Root:** written before these platforms were added. **Correction:** delete the list, or add the others. `osf_license = TRUE` is correct (`code/run_metacheck.R`, line 119).
+
+**C8.5 — QUALIFIED.** Line 846: `mc_data_license` is limited to repositories holding a data-classified file, and a paper can score FALSE though a licence exists, "a common pattern when data and code sit in physically separate repositories". The rule is correct. "Common" is not shown: among the 8 licence verdicts in the coders' favour, this occurs twice.
+
+**C8.6 — TRUE.** Line 848: the licence field "is read verbatim", with varying format. Values include "CC BY 4.0", "cc-by-4.0", "other-open", and full sentences. 1058 of 1058 licensed Dryad repositories carry the CC0 address, and no other platform does. Dryad's rule is confirmed (C2.35). Other repositories use other forms of CC0 (35 rows read "CC0").
+
+**C8.7 — QUALIFIED.** Line 850: the definition of `mc_data_download` is correct, and so is the warning that it is "not download success alone". The reference "(see the Excel multi-sheet limitation in Results)" points to something the manuscript no longer describes. This limitation was fixed (#379, line 1027). **Correction:** remove the reference.
+
+**C8.8 — FALSE.** Line 852: a README is "a purely filename-based match (a base name starting with `"readme"`, case-insensitive, or a package-level `ro-crate-metadata.json`)". In version 0.4.2.1 the rule (`.data_doc_role()`, `file_category()`) is wider. Tested directly: `my_readme.txt`, `Data-README.pdf` and `Data description.docx` all return "readme". Also true: the match is by name only, and there is one signal per paper. **Correction:** "a file name containing 'readme', or beginning 'data description' for a document, or `ro-crate-metadata.json`".
+
+**C8.9 — QUALIFIED.** Line 852: an earlier comparison "inflated the disagreement count by 41%". The number appears in `numbers_audit.md` of the earlier repository as a one-time result and cannot be recomputed here. It is a piece of project history the reader does not need. **Correction:** delete the parenthesis, as with other history.
+
+**C8.10 — QUALIFIED.** Line 854: the definitions of `mc_code_archived`, `mc_code_download` and `mc_code_language` are correct. The last sentence says "`.Rmd`/`.qmd` and `.ipynb` are opened and their code cells inspected; an ambiguous `.html` is content-sniffed". In `code_lang()`, `.ipynb` and `.qmd` are read for their language; `.Rmd` is labelled R from its extension. `.html` has no language in that function; `.code_expand_html()` handles such files separately. **Correction:** "the language of `.qmd` and `.ipynb` files is read from the file".
+
+**C8.11 — TRUE.** Line 856: "`mc_code_used`. Always `NA`." This is set in `recreate_cooper_columns()`.
+
+**C8.12 — TRUE.** Line 858: Cooper et al. has "README/code usefulness ratings (a 1-10 human-judged scale), a four-point data completeness judgment, and a code annotation quality score", pp. 1956-1957. `percentage_comment` exists. They are discussed at line 1023.
+
+## Empirical Comparison
+
+**C9.1 — QUALIFIED.** Line 862: "the 1861 papers we were able to retrieve", and "Metacheck cannot code a paper whose PDF we could not retrieve or convert". All 1861 were retrieved and have text, so no paper falls in this case. A missing value on Metacheck's side has other causes, namely no data repository or no file saved. **Correction:** delete the clause, and write "all 1861 papers". The sentence also has a grammatical gap: "whether data download and code archiving".
+
+**C9.2 — FALSE.** Line 862: "For each construct we report: ... (2) a 2x2 confusion table of agreement and disagreement, (3) sensitivity ..., specificity ..., and McNemar's test". The manuscript prints no confusion table. McNemar's test appears only for data availability and licences, and sensitivity and specificity in the text only for four. **Root:** tables and tests were removed, and this sentence was not. **Correction:** describe what is reported, or add a table of counts. The summary table can hold these.
+
+**C9.3 — QUALIFIED.** Line 862: every one of the 876 papers "was checked directly against Metacheck's own saved module output, the paper's own extracted full text, and ... a live API call at the time of review". See C1.8. A verdict can come from an earlier run, and only 648 of 1216 verdicts have an exact version. Also, comments often name only one or two of these sources. **Correction:** "against the evidence each comment names".
+
+**C9.4 — TRUE.** Line 862: three verdicts with the given meaning, and for README a fourth, `DIFFERENT_DEFINITION`. The manuscript's `stopifnot` allows that verdict for README only, and the tallies have no other labels, apart from `BOTH_WRONG` for 2 papers on code archiving. "Most often because the paper cites more than one repository" holds for the 54 `BOTH_DEFENSIBLE` verdicts on platforms, which are most of the 58.
+
+**C9.5 — FALSE.** Line 862: "every case an earlier round had marked as unclear ... was settled in a final review (15 October 2026) ... (`code/03_comparing_results/review_2026-10-15/`)". This folder does not exist in this repository. The 15 October review was not the last: the file has verdicts stamped 17, 18 and 31 October and 1 November. **Root:** the text was written before the repository was rebuilt and before later rechecks. **Correction:** "settled in later reviews, the last on 1 November 2026; the verdicts and comments are in `data/review/disagreement_review_data.xlsx`".
+
+**C9.6 — TRUE.** Line 862: "Two rules decide what Metacheck is expected to find: only a README *file* counts as a README ..., and a file listing the variables of a data file is a codebook". This describes how the review judged Metacheck's answer. The sentence that follows says these rules are not Cooper et al.'s (C12.9).
+
+**C9.7 — FALSE.** Line 864: the full paragraph, "Following a full corpus rerun ... `data/cooper_vs_recreated.RData` was regenerated ...". This file does not exist in this repository, and the disagreements are now built by the target `disagreement_worklist`. `code_used` is listed as checked, but no verdict column for it exists. The idea it describes, carrying a verdict forward when both answers are unchanged, is still how the worklist works. **Root:** history of the earlier repository. **Correction:** replace with a short description of the final process, which Appendix A.11 gives.
+
+**C9.8 — FALSE.** Line 866: "The numbers reported in this section reflect a SECOND such rebuild, following Appendix A.5's seven further fixes", with `code/02_create_comparison_data/02_build_disagreement_worklist.R`. The numbers reflect the final run of 31 October 2026 with Metacheck 0.4.2.1, in which 191 papers were rerun. The script does not exist here. **Correction:** say this, and cite Appendix A.11.
+
+**C9.9 — TRUE.** Line 866: "`data/review/disagreement_review_data.xlsx`", "All 876 disagreeing papers carry a verdict", and "Each verdict records the date it was written". All 1216 verdicts have a date, 648 are marked as an exact version, and the other 568 carry "no later than" dates.
+
+**C9.10 — QUALIFIED.** Line 868: the defect in the R-package exclusion, "confirmed across 16 real GitHub/CRAN-hosted repositories". The 16 names match the repository addresses of the 16 paper identifiers in the final results. But "the paper's *own* code" does not hold for all: `pdrhlik/phylomice` belongs to someone who is not an author, by the ownership review, and the coders coded no code archived for that paper (10.1111/1365-2435.14552). The history that the listing contained only scaffolding is documented in the appendix and in issue #469, but cannot be recomputed from the final results. "This final round" and "unlike every other defect" are out of date. **Correction:** 15 of the 16, or move to the appendix.
+
+**C9.11 — TRUE.** Line 870: the description of the corrected rule matches `.is_r_package_file()` in the version run: a root-level package is excluded only if real data or code exists outside it, a nested package is always excluded, and service files and RStudio project files are ignored. `MGDrivE` occurs in the results with `Examples/` beside the package. `good 2/` with 25 files is confirmed in issue #505. Issue #469 is closed and describes the second fix. "Resolved 11 of the 16" and "the other 5" are in the appendix, and "16 of the 16" is computed.
+
+**C9.12 — UNVERIFIED.** Line 870: "the 38 repositories flagged by a corpus-wide scan". The appendix does not state the 38 in these words (see the table of typed numbers), and the scan is not in this repository. **To settle:** find it in the earlier repository, or delete the number.
+
+## Is any data available at all?
+
+**C10.1 — TRUE.** Line 874: the quotation and page (p. 1958), and the numbers of the comparison.
+
+**C10.2 — QUALIFIED.** Line 874: "This is a considerably more balanced pattern than an earlier pass ... found". This compares with a result the reader never sees. It remains true as history (see C16.3). **Correction:** delete, in line with reporting only the final results.
+
+**C10.3 — QUALIFIED.** Line 876: "The dominant cause ... (175 of 227) is `repo_check` never detecting a repository". 175 is a count by text patterns on the comments, not a coded cause. It is supported by the audit: all 175 appear there as papers Metacheck missed.
+
+**C10.4 — FALSE.** Line 876: "most often a real, working DOI or URL on a platform `repo_check` has no dedicated backend for (institutional repositories such as DataSTORRE, DIGITAL.CSIC, or the Australian Antarctic Data Centre; domain-specific databases such as NCBI's Sequence Read Archive/GenBank, the Knowledge Network for Biocomplexity, or Neotoma)". The main clause is right: 122 of the 175 are `PLATFORM_NOT_SUPPORTED` in the audit. Three examples are wrong. `datastorre.stir.ac.uk` is in Metacheck's list; those papers are missed because the link is a Handle (C5.15). `knb.ecoinformatics.org` is in its DataONE list, and no comment in this group names it. DIGITAL.CSIC is classed as blocking automated access (C5.6). **Root:** written before those hosts were added. **Correction:** use the Australian Antarctic Data Centre, NCBI, Neotoma, ScienceBase and the Environmental Data Initiative.
+
+**C10.5 — TRUE.** Line 876: "or occasionally a citation malformed by PDF text extraction". 21 of the 175 are extraction gaps in the audit.
+
+**C10.6 — TRUE.** Line 876: "A further 2 trace to a failed fetch ...: a GitHub organisation address ... and a DOI in the availability statement that does not exist (the correct DOI is only in the reference list)." These are 10.1111/2041-210X.13766 (`github.com/OneZoom`) and 10.1111/1365-2745.13288 (`dryad.3cq612` against `dryad.3cq6127`). Note the first paper's data are on Zenodo.
+
+**C10.7 — FALSE.** Line 876: "In the second case Metacheck also crashes with an R error ('arguments imply differing number of rows') ... a bug, not a temporary outage." The version run does not crash. `dryad_info("10.5061/dryad.3cq612")` returns a row with `error = "unfound"`, and `repo_check` run on this paper on 1 November 2026 finished normally with 0 files and a yellow result. The final run recorded no module errors. **Root:** an older version. **Correction:** delete the sentence. If it was a bug that was reported, it can move to the appendix.
+
+**C10.8 — QUALIFIED.** Line 876: "Of the cases resolved in the final review, ... not FAIR in 8, ... a platform Metacheck does not support in 4 (USGS ScienceBase, GBIF, ScholarsArchive@OSU and Phaidra), and missed through a Metacheck bug or limitation in 6 (most often a data DOI broken or dropped when the PDF was converted to text)." The counts and names hold. Of the 6, three or four concern conversion, and others do not (a software deposit counted as data; a text without the section). These groups overlap the 175 and the 2, so a reader must not add them. **Correction:** say that they overlap.
+
+**C10.9 — TRUE.** Line 876: "24 ... `METACHECK_RIGHT`: clear, working ... deposits that Cooper et al.'s coders missed or coded `No` in error, and ... most often a paper whose own availability statement says the data are confidential or available on request". All 24 comments were read. The statement-based group is the larger.
+
+**C10.10 — QUALIFIED.** Line 878: "the remaining gap is now dominated by `repo_check`'s coverage ... addressable by extending its URL-recognition patterns". Most of these need a new way to read a platform, not just a pattern to recognise an address. The history in the first sentence should go. **Correction:** "addressable by support for more platforms".
+
+## Is the data licensed?
+
+**C11.1 — TRUE.** Line 882: "85% (n = 1438) of papers with archived data had a license", p. 1960. The file gives 1437 + 1.
+
+**C11.2 — TRUE.** Line 882: the numbers of the comparison.
+
+**C11.3 — QUALIFIED.** Line 884: "All 57 disagreements were individually resolved against the relevant repository platform's own API, called live at the time of review." Only 9 of the 46 `METACHECK_RIGHT` comments mention a live check; many rest on the saved metadata from that API. **Correction:** "against the licence in the repository's metadata".
+
+**C11.4 — TRUE.** Line 884: "46 were `METACHECK_RIGHT` ... most commonly CC0-1.0 for Dryad datasets ... or a depositor-selected 'Other (Open)' tag for Zenodo records, or a GitHub repository license". All 46 are Cooper "No" with Metacheck TRUE; comments name Dryad in 26, the Zenodo tag in 12, GitHub in 8.
+
+**C11.5 — QUALIFIED.** Line 884: the counts 46 and 8 add to 54, whereas the text says all 57 were resolved. The other 3 are `BOTH_DEFENSIBLE`, which the paragraph does not mention. **Correction:** add them.
+
+**C11.6 — FALSE.** Line 884: "8 were `COOPER_RIGHT`, and the large majority share the same repository-scoping mechanism ...; a smaller number trace to `repo_check` never detecting the licensed repository at all." All 8 comments were read. Two describe the scoping (10.1111/1365-2745.12759, 10.1111/2041-210X.13006). One is a licence of someone else's tool (10.1111/1365-2664.14074), and one a licence Metacheck reports that the repository does not have (10.1111/1365-2745.14000). In the other 4, the comments say only that the GitHub repository has no licence and "Cooper's Yes does not match", which on its face supports Metacheck, not the coders. The verdict is probably still right, for a reason the comments do not give: the coders also coded another deposit, and checked on 1 November 2026, the Zenodo records of 10.1111/2041-210X.13423, 10.1111/1365-2435.13795 and 10.1002/pan3.10527 carry the licence tag `other-open`. Metacheck found two of them through a Zenodo "badge" address, without a licence. The fourth (10.1111/1365-2745.12804) is coded as Figshare and points to Smithsonian data, whose licence could not be read. **Root:** the comments date from 2 September 2026 and were never rewritten. **Correction:** rewrite the 4 comments, and replace the sentence with what these 8 show.
+
+**C11.7 — FALSE.** Line 884: "One of the `COOPER_RIGHT` cases is a Metacheck bug: for an OSF registration, Metacheck asks the OSF for the licence at the address used for ordinary projects". None of the licence comments mentions a registration. The cause table says this was fixed: "With `osf_license = TRUE`, `repo_check` reads the license of an OSF project through its registration" (OSF_LICENSE, commit f7826893). **Root:** the paper changed sides after the fix. **Correction:** delete.
+
+**C11.8 — FALSE.** Line 886: "every case where Metacheck found a license was independently reconfirmed against the same live API". Metacheck reports a licence in 1308 compared papers, and only those that disagreed (50) were reviewed. Two of the 50 were found to be wrong (C11.6). **Correction:** "Among the 50 cases where Metacheck reported a licence and the coders did not, 46 were confirmed." Calling it among the "more reliably automatable" constructs is a judgement that this supports.
+
+## Is there a README?
+
+**C12.1 — TRUE.** Line 890: "A README or equivalent was present for 66% (n = 1114) and 61% (n = 351) of the papers with archived data or code, respectively", p. 1960, verbatim. The form's question is quoted correctly from the protocol, question 8 of the data section. The code section's question reads "Does the code have a README?", so the argument is strongest for data; 283 of the 294 reclassified papers have a data answer of Yes or Quasi-README.
+
+**C12.2 — TRUE.** Line 890: the numbers, and "the largest raw disagreement count of any construct" (467 against 251, 202, 137, 90, 57, 11 and 1). `cooper_any_readme` is as defined.
+
+**C12.3 — QUALIFIED.** Line 892: "We resolved every one of the 467 disagreements by listing the repository files, and opening archives where needed". Of 467, 319 comments carry a review stamp, and the other 148 are older. Most of the older ones are `COOPER_RIGHT` where no repository was detected. The statement should be limited accordingly.
+
+**C12.4 — TRUE.** Line 892: "In 294 the two sides answer different questions (`DIFFERENT_DEFINITION`)". These are all papers where the coders said yes and the review found no README file. Three limits apply. The coders left no record of what they counted, so some of these may be plain errors, which is why the text says "can be right". For 10.1111/1365-2656.12672 the review could not open the Supporting Information, so the absence of a README file there is inferred, and the row says so. The label applies to all 294 by the author's decision of 1 November 2026, and not by rereading each one.
+
+**C12.5 — TRUE.** Line 892: "In 270 of these papers the deposit's web page has a description or abstract they may have counted: most often the abstract on the Dryad page, or a Zenodo or Figshare description field. In the others the deposit may hold a codebook ..., usage notes or a metadata record." The 270 comes from a text pattern on the earlier comments: 165 name Dryad and the abstract, and most of the rest have the Zenodo or Figshare sentence. The 24 others were read: 4 name a codebook, and several mention no such file, only that no README exists, which "may" allows.
+
+**C12.6 — TRUE.** Line 892: "17 were `METACHECK_RIGHT`: a README file exists in a repository Metacheck listed, and Cooper et al.'s coders missed it." These are the rows where the coders said no README and Metacheck found one.
+
+**C12.7 — QUALIFIED.** Line 894: "156 were `COOPER_RIGHT`, dominated (96 cases) by the same repository-detection gap documented for `data_availability` and `code_archived` above". 96 is a count by text patterns. The reference to `code_archived` no longer fits: that section now classifies differently and gives 28. **Correction:** remove it.
+
+**C12.8 — FALSE.** Line 894: "a RAR archive, which Metacheck does not open by design because the format is proprietary." The format is proprietary, but that is not the reason in the code. Metacheck's comment states that ".7z/.rar ... base R cannot read them", and the same comment applies to 7z, which is open. Free tools can read RAR. The count of 5 holds: three RAR, one 7z, one zip. **Correction:** "archives Metacheck does not open, because base R cannot read them".
+
+**C12.9 — TRUE.** Lines 896 and 898: the question "README/metadata" "left room for different readings", and most of the disagreement (294 of 467) "reflects this difference in definition, not an error by either side". The protocol's question is "Does the data have a README/metadata?", its scale is "How useful is the README/metadata?", the cleaned data have the value "Quasi-README", and the article reports "A README or equivalent" (p. 1960). Until 1 November 2026 the manuscript called these cases "human coding error", under a rule adopted for the review on 15 October 2026 and applied as if it had been the question. The rule remains right for what a machine can check, and the text now keeps the two apart.
+
+**C12.10 — QUALIFIED.** Line 894: "The contents of ordinary zip archives are already listed, and README files inside them are found." This is true in general, but not for one of the cases in this very paragraph: 10.1111/1365-2664.14821 has `Data description.docx` inside a zip, and Metacheck's answer is FALSE. **Correction:** "usually found".
+
+**C12.11 — QUALIFIED.** Line 894: "Other READMEs have a name Metacheck's README rule does not recognise": five examples. Four are confirmed (`metadata.txt`, a `_METADATA_` file, `Data Index.xlsx`, a description file opening "Accompanying notes"). The "Word document called 'Data description'" is not: `.data_doc_role()` returns "readme" for this name. It fails because it is inside a zip (C12.10). **Correction:** remove this example.
+
+**C12.12 — TRUE.** Line 896: "for 135 papers the coders gave no usable answer ... 'Unsure' (22 papers). For 63 of these papers the coders had recorded archived data or code". Counts are from the file. "Should have been answered" follows from the form.
+
+**C12.13 — UNVERIFIED.** Line 898: "(Plain tar archives, zip archives over 4 GB and Dryad file listings past the first page are handled since Metacheck 0.3.3.9.)" The audit records a paging fix (for example "since the paging fix", commit 610cd4f2), but no record ties these to version 0.3.3.9, and the package's news file does not cover it. **To settle:** the commit log of `scienceverse/metacheck`, or delete the version.
+
+**C12.14 — JUDGEMENT.** Line 898: "Whether a deposit contains a README file is a fact a machine can check", and judging usefulness "remains a task for human coders".
+
+## Comment count and comment quality
+
+**C13.1 — TRUE.** Line 902: `code_annotation_scale`, "coded for 543 of the 1861 papers", and `code_check` records `comment_lines`, `code_lines` and `percentage_comment`. The columns exist, and 543 follows from the file.
+
+**C13.2 — JUDGEMENT.** Line 902: if a line count tracked the rating, the rating "adds comparatively little"; if not, coders "are picking up on something a mechanical count cannot see". This is the reasoning behind the comparison.
+
+**C13.3 — TRUE.** Line 918: comment lines are divided by "total lines", over all files with counts. The code divides by the sum of comment and code lines, which amounts to the same up to the handling of blank lines.
+
+**C13.4 — FALSE.** Line 918: "the smaller overlap reflects that Metacheck's count requires at least one code file to have actually downloaded and parsed". This is not the main reason. Of 452 papers with code in Metacheck's table, 450 have counts, so failed downloads and parsing cost 2 papers. The overlap is 389 of 543 because Metacheck found no code for 152 of the rated papers, for the reasons given in the code section, and 2 others have code without counts. **Correction:** "the smaller overlap reflects that Metacheck found no code for 152 of the rated papers."
+
+**C13.5 — TRUE.** Line 920: "The correlation is weak but not zero", with the printed values. Both computations agree.
+
+**C13.6 — JUDGEMENT.** Line 920: the raw count "gives essentially the same result ... so this is not an artifact of how the percentage was computed" (0.14 against 0.17), and the negative correlation of length with percentage (-0.30) is "not something that would by itself explain" the weak correlation. The numbers are correct, and these are interpretations.
+
+**C13.7 — QUALIFIED.** Line 922: "a paper's comment *density* is a poor stand-in for a human coder's *quality* judgment". True for these data, with one omission. Cooper et al. warns that annotation quality was "less consistent among data recorders": the same paper received ratings from 2 to 10 (p. 1958). A rating that varies this much between raters limits any correlation with it. **Correction:** add this, which weakens the conclusion that the count does not track annotation quality.
+
+**C13.8 — FALSE.** Line 922: "A single well-placed sentence explaining a complex analysis counts as excellent annotation on Cooper et al.'s scale". Their scale runs from "1=not annotated at all" to "10=thorough annotation throughout" (p. 1957). A single sentence would not reach the top of it. **Correction:** "Comments that restate the code count as heavy annotation by line count, whereas few but informative comments count little", without a statement on their scale.
+
+**C13.9 — JUDGEMENT.** Line 922: boilerplate "would plausibly score poorly", and a language-model classifier "could more plausibly approximate" content, with validation.
+
+## What the modules report beyond the comparison
+
+**C14.1 — QUALIFIED.** Line 926: this output is something "no item in Cooper et al.'s protocol asks for", "computed entirely from the same saved module output ... (`res_repo_check.RData`, `res_data_check.RData`, `res_code_check.RData`)". The source is right, with no further run. The three file names do not exist here; these are now `data/metacheck_results.rds` and the targets. **Correction:** update the names. The protocol's questions on annotation overlap comment density.
+
+**C14.2 — QUALIFIED.** Line 939: "`code_check` parsed 9170 code files across 452 code-bearing papers". 9170 is the number of rows in its table. Line counts exist for 9153 files, and parsing as a program applies only to the language R (5732 files). **Correction:** "listed".
+
+**C14.3 — TRUE.** Line 939: Appendix A.3 describes a validation of five checks against corpus files, and the appendix's opening says it "produced five further fixes". The final results come from a later version.
+
+**C14.4 — TRUE.** Line 941: "For every code file, `code_check` extracts every filename the code itself tries to open ... and checks whether that name appears anywhere in the same paper's repository listing." The counts follow from `loaded_files_missing`. The stated caution, that the file may be generated or matched badly, is appropriate.
+
+**C14.5 — QUALIFIED.** Line 942: "Code written this way will not run on any machine but the one it was written on without manual editing." The count is correct. The sentence goes beyond the check, which matches a pattern in lines that are not comments: the file need not be run, and no sample was validated. **Correction:** "is likely not to run".
+
+**C14.6 — TRUE.** Line 943: "473 files (5.2%), across 109 papers (24.1%), call `setwd()`". Only R files are checked for this, so the percentage over all languages is low; over R files it is 8.2%.
+
+**C14.7 — TRUE.** Line 943: paths and `setwd()` "frequently co-occur". 68 papers have both, of 122 and 109.
+
+**C14.8 — FALSE.** Line 943: "the two portability problems together affect 284 of the 452 code-bearing papers (62.8%) — meaning more than half of the papers whose code we could inspect at all have at least one file that will not run as shared". The two problems named affect 163 papers (36.1%). The 284 also counts papers with a missing referenced file, a third check that the manuscript says at line 941 "does not necessarily mean the code is broken". **Root:** `papers_portability` in `code/R/free_extras_summary.R` is a union of three groups, with its comment saying "1/2/3 combined", whereas the sentence was written about two. **Correction:** either "the two problems together affect 163 of 452 (36.1%)", or "the three checks together flag 284 of 452 (62.8%)", and drop "will not run".
+
+**C14.9 — TRUE.** Line 947: comment share, zero-comment files, and docstrings. `has_docstring` exists and applies to Python. The phrase "of which" joins two different groups: 956 files with zero comments, and 303 of 404 among those that are Python.
+
+**C14.10 — TRUE.** Line 951: "Where a file loads more than one package, `code_check` also records how far apart those loading lines are", and the threshold is more than 3 lines, as in `code_check.R` (line 511). The denominator has R and Python files only, because the other languages yield no such lines.
+
+**C14.11 — QUALIFIED.** Line 955: "R-type code files (`.R`, `.Rmd`, `.qmd`)". The group also has 14 `.ipynb` notebooks with an R kernel. The counts are right. "Strong, unambiguous signal" is a judgement, with its own qualifier in that sentence: the fault may lie in Metacheck's identification. **Correction:** add `.ipynb`.
+
+**C14.12 — TRUE.** Line 959: the forms of pinning match the module (`renv.lock`, `sessionInfo()`, `groundhog`, `checkpoint`), with 37 of 452 papers. Appendix A.2 covers it.
+
+**C14.13 — TRUE.** Line 963: the description of `data_check`, and "53875 findings, spanning 6022 distinct files". The named checks all occur in the findings (rectangular, header, colour, merged, personal information, coordinates, case, numbers as text, encoding).
+
+**C14.14 — QUALIFIED.** Line 974: "Two of these are worth calling out ...: the two personal-information checks ... and the 'free text that may hold PII' check". This names three checks. The count, 2255, is the sum of 1865, 137 and 253. **Correction:** "Three".
+
+**C14.15 — FALSE.** Line 974: "a column named 'participant_id' that holds only anonymous sequential integers would also match on name alone". Tested with the function: `data_check_pii_name("participant_id")` does not flag it, nor `participant`, `name` or `subject_id`, whereas `email` is flagged. **Root:** an assumption, not a test. **Correction:** use the module's own example: "a column called `phone_number` flags whether or not it holds one", and add its warning that these checks "are tuned to over-report".
+
+**C14.16 — JUDGEMENT.** Line 974: "a count this size suggests a possible participant-privacy check would find comparable value". Without a validated sample, the count alone cannot show this, because the checks over-report on purpose.
+
+**C14.17 — FALSE.** Line 978: `repo_check` checks names against "no spaces or special characters, an actually-classifiable name ..., consistent casing, zero-padded sibling numbering, valid dates, and several path-length budgets", and "bad" includes "an invalid date". In version 0.4.2.1, `check_file_naming()` has nine rules: spaces, special characters, diacritics, unclassifiable, zero padding, two path lengths, directory length and file-name length. Casing and dates are not among them. **Root:** an earlier version. **Correction:** delete both.
+
+**C14.18 — TRUE.** Line 978: the counts: 74966 issues, 51334 "bad", 23632 "suggestion", 694 papers (44.5% of 1561).
+
+**C14.19 — FALSE.** Line 978: "The single largest contributor by far is 'unclassifiable' file names (15954 occurrences)". The largest is special characters, 31480. Among all rules, unclassifiable is second. **Root:** the code's table is in the right order, but the sentence was written when the counts differed. **Correction:** "The largest are special characters (31480) and unclassifiable names (15954)". The first should be computed.
+
+**C14.20 — QUALIFIED.** Line 978: the bad group is "something that actually breaks". The special-characters rule flags anything other than letters, digits, dot, underscore, dash and space, including a parenthesis, which in most systems does not break anything. **Correction:** "something more likely to cause problems".
+
+**C14.21 — QUALIFIED.** Line 980: these findings are "not independently verified the way every number earlier in this manuscript was". Earlier, only disagreements were reviewed; agreements were not checked, and both sides could be wrong in the same way. Appendix A.3 did validate some of these checks. **Correction:** "not compared with any human coding".
+
+## Discussion: what should change
+
+**C15.1 — TRUE.** Line 984: text extraction from PDF "has known limitations which lead to broken or undetected links to repositories". 30 papers in the audit show this. "PDF files are created to optimize human readability" is a general description.
+
+**C15.2 — QUALIFIED.** Line 984: "(e.g., see CITE https://github.com/scienceverse/bibr/releases/tag/v0.6.0)". The release exists (30 September 2026). The word CITE is a placeholder for a reference, and the same holds for `ms_FAIR_data_and_code`, which also exists. **Correction:** add both to `references.bib`.
+
+**C15.3 — TRUE.** Line 984: publishers could share machine-readable XML "as for example PLOSone already does". A PLOS ONE article's file address returned `application/xml` when tested. The journal is written "PLOS ONE".
+
+**C15.4 — QUALIFIED.** Line 984: "our review shows that many institutional repositories need repository-specific development work (see the Metacheck limitation cluster above)". The cluster named holds text conversion and defects on platforms already supported. The evidence for this claim is in the group "FAIR, on an unsupported platform", 101 papers. **Correction:** change the reference.
+
+**C15.5 — JUDGEMENT.** Line 984: tools should support all FAIR repositories and formats; researchers, journals and repositories should do what is listed; Metacheck can assist, "as the current manuscript demonstrates".
+
+**C15.6 — FALSE.** Line 984: "The Dryad repository is not accessible without an API key, and even then allows only a very limited number of API requests". Without a key, Dryad's dataset, version and file-listing API answers: tested on 1 November 2026 with HTTP 200, and Metacheck's own message says listings and metadata "can be read without one". What needs a key is the file contents: a request without one returned HTTP 401, also tested. On limits, Dryad's documentation says an API account lets one "access the API at higher rates", without a number that was found. The appendix records HTTP 429 during the run. **Correction:** "Dryad's API returns metadata without a key, but file contents require one, even for public datasets, and requests are limited in rate, which slows automated checks."
+
+**C15.7 — JUDGEMENT.** Line 984: "Researchers are recommended to share data in fully machine accessible repositories, such as Zenodo, instead." The advice follows from C15.6. Readers should also learn that Appendix A.5 records Zenodo faults, and that most BES data are on Dryad, whose deposits the society has sponsored (<https://jecologyblog.com/2014/01/20/journal-of-ecology-is-part-of-new-bes-data-archiving-policy/>).
+
+**C15.8 — TRUE.** Line 984: "Some repositories do not yet have an API". 53 papers in the audit, by its judgement.
+
+**C15.9 — FALSE.** Line 986: "Registries of data repositories exist (e.g., https://www.re3data.org) but the registry does not contain information about the APIs used by each repository." re3data records this. The record for Dryad, requested through its own API on 1 November 2026, holds `<r3d:api apiType="REST">https://datadryad.org/api/v2/docs/</r3d:api>`. **Root:** presumably an impression from the website. **Correction:** "re3data records APIs for repositories that report them, but not whether a tool can use them." This could be useful for adding support.
+
+**C15.10 — TRUE.** Line 986: "Some repositories disappear, and new ones are added." 14 papers point to repositories not live or not accessible when checked, and one GitHub repository no longer exists.
+
+**C15.11 — JUDGEMENT.** Line 986: support is straightforward with an established API and needs more effort with a unique one. This matches Metacheck's code, with families of hosts and 11 dedicated platforms. It seems likely that large repositories will be more findable. Dryad is named here as more findable, shortly after being named as hard to access (C15.6), and these two could be reconciled.
+
+## Discussion: patterns in the table
+
+**C16.1 — QUALIFIED.** Line 990: the table has "agreement rate, sensitivity, specificity, and the two directional miss rates for every construct". For the two platform rows only agreement is given (C1.7). The column heading "Cooper caught, MC missed" also reads badly for README: its 95.1% includes the 294 papers where the coders coded a README or metadata and no README file exists, so nothing was missed. **Correction:** "Cooper yes, MC no" and "MC yes, Cooper no".
+
+**C16.2 — JUDGEMENT.** Line 1019: "Two patterns are visible across every construct", and "the cause matters more than the raw percentage".
+
+**C16.3 — QUALIFIED.** Line 1019: `data_availability`'s specificity "is far from the zero an earlier pass of this corpus found, precisely because the derivation-rule fix". The code sets a paper with no repository to FALSE, as described. This compares with a value the reader has not seen. **Correction:** delete, as in C10.2.
+
+**C16.4 — TRUE.** Line 1019: `code_download` has one disagreement (100%, 0%), and `data_download` has "only 2 codeable Cooper-`No` cases, too few for its specificity". These hold. The same caution applies to `code_download`, with 1 case.
+
+**C16.5 — FALSE.** Line 1019: "`code_archived` shows the most pronounced asymmetry of any boolean construct (sensitivity 71.2%, specificity 96.7%)". The gap is 25.5 points. Those of the others are: `any_readme` 31.0, `data_availability` 42.2, `data_license` 72.9, and `data_download` and `code_download` higher still, with almost no negative cases. Taken as the share of disagreements in one direction, it is 82% against 95% for README and 90% for data availability. **Root:** written when other values were different. **Correction:** "`code_archived` has low sensitivity and high specificity", without the superlative.
+
+**C16.6 — TRUE.** Line 1019: `code_archived` "is genuinely multi-causal, spanning code the paper does not link to directly, a repository-detection gap, and ... journal Supporting Information". These are the categories 34, 28 and 33.
+
+**C16.7 — TRUE.** Line 1019: "`any_readme`'s asymmetry is mostly a matter of definition: in 63.0% of its disagreements Cooper et al. coded a README or metadata, and the deposit contains no README file." 294 of 467. See C12.9.
+
+**C16.8 — TRUE.** Line 1021: "positive predictive value was above 96% for five of the six boolean constructs", with the printed values. "Rarely spurious" means rare by the coders' answer.
+
+**C16.9 — QUALIFIED.** Discussion: `code_archived`'s lower value holds "because in 21 of its 202 disagreements `code_check` correctly found real code files ... a genuine human-coder miss, not a Metacheck false positive". The value rests on 36 such cases. In 21 the coders were wrong. In the other 15 Metacheck's Yes is a false positive: 13 counted others' software, and 2 a README. Two of these 15 are also coder errors (C7.16). The sentence gives only the first group, and it makes the lower value seem to be no fault of the tool's. **Correction:** give both numbers.
+
+**C16.10 — TRUE.** Line 1021: "overwhelmingly a *recall* problem for most constructs". The share of disagreements where the coders found what Metacheck did not is 90%, 82%, 82% and 95% for four constructs. Licences (12%) and code download (0%) go the other way, as "most" allows.
+
+**C16.11 — QUALIFIED.** Line 1021: "for `code_archived` specifically, a nontrivial share of Metacheck's `FALSE` answers reflect a real detection gap". This is true: the negative predictive value is 86.4%. But it does not follow from the discussion of positive values, and "specifically" is not warranted, since the same holds for data availability and README. **Correction:** remove "specifically".
+
+**C16.12 — TRUE.** Line 1023: "Three constructs ... have no Metacheck counterpart". Usefulness, completeness and annotation (C8.12).
+
+**C16.13 — JUDGEMENT.** Line 1023: structural questions are answered reliably and interpretive ones less so; language models are "a plausible route". Examples such as "is this repository the one holding the data" are supported by reviews, and the example of a description being a real README is a question of definition (C12.9).
+
+## Discussion: the repository detection statement
+
+**C17.1 — FALSE.** Line 1025: "the data-versus-code repository conflation pattern ... appears as the dominant or a substantial cause of disagreement in `data_archive`, `data_license`, and `code_archived` alike. This is not three independent bugs; it is one architectural gap". The current review does not support it. In `data_license`, the scoping appears in 2 of 8 `COOPER_RIGHT` verdicts. In `code_archived`, none of the 21 reasons in the classification of 203 is of this kind. In `data_archive`, the categories are of a different kind (C6.8). The review has no such category, and the code does not contain a single assumption of "the" repository: it uses all repositories. **Root:** a summary of an early stage of review. **Correction:** delete the passage. It is also followed by "It remains ... the single largest reason", which refers to something else, namely non-detection.
+
+**C17.2 — FALSE.** Line 1025: "a paper's own text names a real, working DOI on a mainstream platform (overwhelmingly Dryad, Zenodo, or Figshare), and `repo_check` never queries it at all." This contradicts line 876, and the evidence supports line 876. Of the 175 papers in this group, the coders labelled 136 "Other repo/database", and only 32 are labelled Dryad, Figshare or Zenodo alone. In the audit, 122 are on platforms Metacheck does not support. **Root:** an early stage, before those platforms were reviewed. **Correction:** "a paper's text names a repository, most often on a platform Metacheck does not support".
+
+**C17.3 — TRUE.** Line 1025: repository non-detection "accounts for 175 of `data_availability`'s 227 `COOPER_RIGHT` disagreements and 96 of `any_readme`'s 156". The counts come from text patterns (Part 1), and all 175 appear in the audit. The audit was not matched for the 96.
+
+**C17.4 — TRUE.** Line 1025: "For code it is a smaller cause, accounting for 28 of `code_archived`'s 167 ..., behind code on Zenodo that the paper does not link to directly (34) and code provided only as journal Supporting Information (33)."
+
+**C17.5 — TRUE.** Line 1025: "These two causes lie in how authors share code, so changes to Metacheck would not resolve them." For the first group, a tool could follow Dryad's related works, but under the manuscript's definition this would not count as a direct link.
+
+**C17.6 — JUDGEMENT.** Line 1025: fixing the gaps "at the level of how Metacheck decides which repository 'counts'" "would likely resolve a meaningful fraction". Given C17.1 and C17.2, what would help is support for more platforms, since 122 of the 175 are of that kind.
+
+## Discussion: history of defects
+
+**C18.1 — FALSE.** Line 1027: "Twelve individual software defects identified over the course of this project were reported upstream, fixed, and reverified against a full corpus rerun". The count is out of date. The appendix's headings alone give 5 in A.1, 5 in A.3, 7 in A.5, 3 in A.6 and 3 in A.8, and it describes more. Not all are fixed: #505 is open, and the manuscript itself reports others as remaining. **Root:** the number dates from A.5. **Correction:** give a count from the appendix, or write "Defects found were reported", citing it.
+
+**C18.2 — TRUE.** Line 1027: the five issues (#379, #380, #378, #383, #384) exist and were closed on 6 September 2026, and their descriptions match. #384's title concerns a failed fetch, and the truncation cause is reported in its comments and in Appendix A.1.
+
+**C18.3 — FALSE.** Line 1027: agreement on `data_download` "rose from 93.5% to 99.1%" through the fix of #379. Appendix A.1 says "disagreed on 51 of 967 comparable papers (94.7% agreement); after it, agreement rose to 99.1% (908/916 papers...)", and 51 of 967 is indeed 94.7%. The figure of 93.5% occurs in `numbers_audit.md` of the earlier repository. Neither can be recomputed from the final results, as they describe earlier runs. **Root:** two stages of the project were recorded separately. **Correction:** use 94.7% with the appendix's counts, or delete the figures, since the body should report the final results.
+
+**C18.4 — TRUE.** Line 1027: `code_download` rose "from 66.2% ... to 89.7% ... to 97.2%", "the largest of any construct", and it is now 99.8%, with 1 disagreement. The 32,768-byte limit is in the appendix and the issue. The values before 99.8% are historical.
+
+**C18.5 — QUALIFIED.** Line 1029: "A further seven fixes ... Six of the seven had not; the seventh — the R-package-source-tree exclusion". The appendix's A.5 counts two for Zenodo, three for platforms and two for rate limits, which leaves no place for the exclusion as a separate fix, and its opening paragraph says "five more fixes". A rerun of the other 868 papers is described, supporting the check. "Six of the seven had not" broken anything has no record to test. **Correction:** make the appendix consistent, and write "one of these".
+
+**C18.6 — QUALIFIED.** Line 1029: the account of the 16 repositories repeats lines 868 and 870 almost word for word, with the same caution about `phylomice` (C9.10). **Correction:** keep one.
+
+**C18.7 — QUALIFIED.** Line 1031: "Appendix A documents, in full detail, every defect ...; the body of this manuscript reports only the current, post-fix numbers." The appendix is now a separate document, titled "Appendix". The body does report earlier numbers, in the paragraph before this one. "Trained human coder" appears here (C2.24). The evaluation of the approach as "the more useful contribution" is a judgement. **Correction:** delete the second clause, and update the reference.
+
+## Section at the end headed LEFTOVERS
+
+This text is marked as left over. It is tested so that it can be reused.
+
+**C19.1 — UNVERIFIED.** Line 1048: "Our first review had marked 6 of these 10 as 'Metacheck right'". This describes a former state of the review file, which is not in this repository. The other numbers in lines 1047 to 1055 are recomputed in Part 1, and the statements follow from `third_party_repositories`.
+
+**C19.2 — FALSE.** Line 1061: Metacheck missed the other deposit "in three cases because the data were inside an archive it did not open". The review file gives 2 of 5 (`CLASSIFIER_ARCHIVE_NOT_EXPANDED`), and one each for a file format, a defect and an unsupported platform.
+
+**C19.3 — FALSE.** Line 1061: "(for example the `newspaper` Python library, or the Project Gutenberg text corpus)". The `newspaper` library is in this group. Gutenberg is not mentioned in any comment of this review; it belongs to the ownership review (C6.13).
+
+**C19.4 — TRUE.** Lines 1061 and 1063: the other counts are recomputed in Part 1. The review comments support the descriptions read, among them that "two of these GitHub repositories hold software or data of another research group" (Seabird_PVA_Tool, computo-deeplearning-occupany-lynx). "Almost always the Zenodo DOI" holds: 21 of 22.
+
+**C19.5 — FALSE.** Line 1065: the text breaks off in mid-sentence ("Not all of these addresses point to the authors' own deposits. P"). **Correction:** complete it or remove it.
+
+**C19.6 — TRUE.** Line 1066: comparisons depend on Metacheck classifying files, and they cover only papers both sides coded.
+
+**C19.7 — TRUE.** Line 1057: "from an address alone, an automated tool cannot tell whether a repository is the authors' own deposit". This follows from C6.10. The review needed the author list as well.
+

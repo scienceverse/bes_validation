@@ -1,0 +1,8 @@
+"variable_name","label","values","missing_values","question"
+"doi","DOI of the paper","","empty cell or NA",""
+"journal","Journal","Ecological Solutions and Evidence; Functional Ecology; Journal of Animal Ecology; Journal of Applied Ecology; Journal of Ecology; Methods in Ecology and Evolution; People and Nature","empty cell or NA",""
+"year","Year of publication","2017; 2018; 2019; 2020; 2021; 2022; 2023; 2024","empty cell or NA",""
+"paper_number","Number of the paper in Cooper et al.'s coding (paper_number in cooper_coded_data.csv)","","empty cell or NA",""
+"article_id","This project's identifier of the paper, made from its DOI","","empty cell or NA",""
+"source","Where the paper's text was obtained","europepmc; wiley_proxy","empty cell or NA",""
+"ok","Whether the paper's text was obtained","TRUE","empty cell or NA",""

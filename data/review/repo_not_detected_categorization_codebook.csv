@@ -1,0 +1,5 @@
+"variable_name","label","values","missing_values","question"
+"article_id","This project's identifier of the paper","","empty cell or NA",""
+"column","Comparison column the row belongs to","any_readme_comment; code_archived_comment; data_availability_comment","empty cell or NA",""
+"comment","Reviewer's comment","","empty cell or NA",""
+"category","Category of the reason the repository was not detected","","empty cell or NA",""

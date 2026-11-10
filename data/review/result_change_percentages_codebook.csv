@@ -1,0 +1,4 @@
+"variable_name","label","values","missing_values","question"
+"column","Column compared with Cooper et al.","any_readme; code_archive; code_archived; code_download; data_archive; data_availability; data_download; data_license","empty cell or NA",""
+"earlier_pct_agree","Percentage agreement in the earlier repository's results of 2026-10-18","72.8852838933951; 77.8048780487805; 85.4755043227666; 88.016776512882; 90.4490377761939; 95.6916099773243; 99.1772625280479; 99.7524752475248","empty cell or NA",""
+"earlier_n_both_coded","Number of papers both coded in those results","1323; 1337; 1403; 1669; 1726; 1735; 404; 410","empty cell or NA",""

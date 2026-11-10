@@ -1,0 +1,14 @@
+.Rhistory
+.Rproj.user/
+.quarto/
+_targets/
+*.tmp
+*.log
+# Full text of copyrighted papers: never shared.
+data/bes.rds
+
+/.quarto/
+**/*.quarto_ipynb
+
+# Cooper et al.'s article, kept locally only
+documentation/cooper_original_paper.pdf
