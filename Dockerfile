@@ -27,7 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Quarto 1.9.37, the version the manuscript was rendered with; it includes Typst.
 RUN /rocker_scripts/install_quarto.sh 1.9.37
 
-# LaTeX, for the appendix and the verification document.
+# LaTeX, for the appendix and the verification document. A fixed CTAN mirror: the
+# default picks one at random, and some fail certificate verification in the build.
+ENV CTAN_REPO=https://mirror.koddos.net/CTAN/systems/texlive/tlnet
 RUN /rocker_scripts/install_texlive.sh
 ENV PATH=/usr/local/texlive/bin/linux:$PATH
 
