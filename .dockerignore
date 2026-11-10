@@ -1,0 +1,14 @@
+.git
+.Rproj.user
+.Rhistory
+.RData
+_targets
+renv/library
+*.tmp
+*.log
+manuscript_files
+documentation/manuscript_files
+documentation/*.typ
+# Full text of copyrighted papers: never shared, and not needed to build the paper.
+data/bes.rds
+documentation/cooper_original_paper.pdf

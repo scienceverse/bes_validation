@@ -15,6 +15,10 @@ README.md                     this file
 ro-crate-metadata.json        every file, for machines (made by code/build_documentation.R)
 _targets.R                    the pipeline from the results to the manuscript
 _quarto.yml                   settings for rendering the manuscript
+renv.lock                     the R packages, at the versions used
+Dockerfile                    a Docker image with R, RStudio, the packages, Quarto and LaTeX
+docker/
+  check_reproduction.R        rebuilds everything and compares the manuscript's numbers with the published PDF
 code/
   run_metacheck.R             runs metacheck on all papers; creates data/metacheck_results.rds
   match_reported_results.R    creates data/match_reported_results.rds
@@ -41,6 +45,7 @@ documentation/
   manuscript_verification.pdf  the rendered verification
   session_info_documentation.txt  the software used for the last render
   cooper_supplement_documentation.pdf  Cooper et al.'s coding protocol
+  _extensions/                the apaquarto extension (version 7.0.2) for APA style
 tests/                        tests of the pipeline
 ```
 
@@ -59,6 +64,44 @@ targets::tar_make()
 
 `tar_make()` runs only what is out of date, and renders the manuscript to
 `documentation/manuscript.pdf` and the appendix to `documentation/appendix.pdf`.
+This needs R 4.5.3, Quarto 1.9.37 (which includes Typst, for the manuscript) and LaTeX
+(for the appendix and the verification document).
+
+### With Docker
+
+The `Dockerfile` builds an image with all of this: R 4.5.3, RStudio Server, the packages
+of `renv.lock`, Quarto 1.9.37, LaTeX and this repository. GitHub builds and publishes it
+on every change to `main` (`.github/workflows/docker-image.yml`), as
+`ghcr.io/scienceverse/bes_validation` (`latest`, a version such as `1.0`, or the short
+code of a commit). To download it instead of building it, replace `bes_validation` by
+`ghcr.io/scienceverse/bes_validation:latest` in the commands below. To build it yourself,
+from the root of the repository:
+
+```
+docker build -t bes_validation .
+```
+
+The build rebuilds the whole paper once, from the data, and stops with an error if any
+number in the rebuilt manuscript differs from the published `documentation/manuscript.pdf`.
+It takes about 15 minutes; the image is about 6 GB. To work in RStudio, start the image
+and open <http://localhost:8787> in a browser (user name `rstudio`):
+
+```
+docker run --rm -p 8787:8787 -e PASSWORD=choose_a_password bes_validation
+```
+
+The project is in `~/bes_validation`; `targets::tar_make()` reruns the pipeline there.
+To repeat the check without RStudio, which also works without internet access:
+
+```
+docker run --rm --network none bes_validation Rscript docker/check_reproduction.R
+```
+
+It deletes every stored result, rebuilds the pipeline, the manuscript, the appendix and the
+verification, and reports whether every number in the rebuilt manuscript (627 on
+10 November 2026) is identical to the published version. The image has no Times New
+Roman, a font that may not be redistributed, so its PDF uses another font and its line and
+page breaks can differ; the check therefore compares the numbers, not the layout.
 
 ## From the papers to the results
 
