@@ -382,7 +382,7 @@ in_chunk <- (cumsum(grepl("^```", manuscript)) %% 2 == 1) | grepl("^```", manusc
 yaml_end <- which(manuscript == "---")[2]
 section <- character(length(manuscript)); current <- "Front matter"
 for (i in seq_along(manuscript)) {
-  if (!in_chunk[i] && grepl("^#{2,4} ", manuscript[i])) current <- sub("^#+ ", "", manuscript[i])
+  if (!in_chunk[i] && i > yaml_end && grepl("^#{1,4} ", manuscript[i])) current <- sub("^#+ ", "", manuscript[i])
   section[i] <- current
 }
 inline_pattern <- "`r [^`]+`"
@@ -449,7 +449,7 @@ remaining_tables <- function() {
 
 # Purpose and method
 
-This document records, for the manuscript "Automating Data- and Code-Archiving Checks with Metacheck", where each number comes from and whether each factual statement is accurate. It has two parts. Part 1 is a register of numbers. Part 2 is a register of factual statements. It replaces `numbers_audit.md` of the earlier repository (Lakens/cooper-bes-validation) and keeps that file's fields: the location of a number, what it means, the chain of files that produce it, the formula, and how to read it. The checks and explanations were produced by Claude (Anthropic's AI model, Opus 5.5) at the request of Daniël Lakens, and have not yet been reviewed by a person.
+This document records, for the manuscript "Automatically Identifying FAIR Data and Code Sharing Practices with Metacheck" (titled "Automating Data- and Code-Archiving Checks with Metacheck" until 10 November 2026), where each number comes from and whether each factual statement is accurate. It has two parts. Part 1 is a register of numbers. Part 2 is a register of factual statements. It replaces `numbers_audit.md` of the earlier repository (Lakens/cooper-bes-validation) and keeps that file's fields: the location of a number, what it means, the chain of files that produce it, the formula, and how to read it. The checks and explanations were produced by Claude (Anthropic's AI model, Opus 5.5) at the request of Daniël Lakens, and have not yet been reviewed by a person.
 
 ```{r}
 #| label: state

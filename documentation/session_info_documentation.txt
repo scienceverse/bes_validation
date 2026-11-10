@@ -1,4 +1,4 @@
-- Session info ---------------------------------------------------------------
+─ Session info ───────────────────────────────────────────────────────────────
  setting  value
  version  R version 4.5.3 (2026-03-11 ucrt)
  os       Windows 11 x64 (build 26200)
@@ -12,7 +12,7 @@
  pandoc   3.8.3 @ C:\\Program Files\\Quarto\\bin\\tools/ (via rmarkdown)
  quarto   1.9.37 @ C:\\PROGRA~1\\Quarto\\bin\\quarto.exe
 
-- Packages -------------------------------------------------------------------
+─ Packages ───────────────────────────────────────────────────────────────────
  package           * version  date (UTC) lib source
  askpass             1.2.1    2024-10-04 [1] CRAN (R 4.5.1)
  backports           1.5.1    2026-04-03 [1] CRAN (R 4.5.3)
@@ -43,7 +43,7 @@
  knitr               1.51     2025-12-20 [1] CRAN (R 4.5.2)
  lifecycle           1.0.5    2026-01-08 [1] CRAN (R 4.5.2)
  magrittr            2.0.5    2026-04-04 [1] CRAN (R 4.5.3)
- metacheck         * 0.4.3.19 2026-11-08 [1] local
+ metacheck         * 0.4.3.26 2026-11-10 [1] Github (scienceverse/metacheck@d3aab6c)
  officer             0.7.5    2026-05-15 [1] CRAN (R 4.5.3)
  openssl             2.4.2    2026-06-09 [1] CRAN (R 4.5.3)
  openxlsx            4.2.8.1  2025-10-31 [1] CRAN (R 4.5.2)
@@ -83,6 +83,6 @@
 
  [1] C:/Users/dlakens/AppData/Local/R/win-library/4.5
  [2] C:/Program Files/R/R-4.5.3/library
- * -- Packages attached to the search path.
+ * ── Packages attached to the search path.
 
-------------------------------------------------------------------------------
+──────────────────────────────────────────────────────────────────────────────
