@@ -55,308 +55,77 @@ knitr:
     dpi: 300
 execute:
   echo: false
-abstract: "Journals increasingly require authors to share data and code, but checking whether submitted articles comply is effortful. Cooper and the BES Data and Code Hackathon Group (2026) manually coded data- and code-archiving practices in 1861 papers published in the seven British Ecological Society journals between 2017 and 2024, in a two-day hackathon with 145 participants. We examine to what extent this information can be extracted automatically from an article and its linked repositories. We ran Metacheck, an open source tool that checks articles and repositories for best practices, on the same articles and compared its results with the manual coding. Agreement was 85.5% on whether data were available in a repository, 87.9% on whether code was archived, 95.7% on whether the data had a licence, and 72.9% on whether a README was present; where both found data or code, agreement on whether it could be downloaded was above 99%. Claude Opus 5.5 reviewed every disagreement. About two in five of the papers where coders found data or code that Metacheck missed had not shared it in a way a machine can retrieve; most others reflect technical limitations of Metacheck, such as text extraction from PDF files and the repositories and file types it supports. For READMEs, most disagreements reflect a difference in what counts as a README. The manual coding was not always right: for licences, the automatic coding was correct in 46 of 57 disagreements. Metacheck also ran the code of 435 papers: 21.8% of 2874 scripts ran without an error, revealing common problems authors can resolve. Automated tools can find data and code that human coders miss, and could substantially reduce the time needed for such checks. They cannot replace human judgement, but can support workflows that check whether data and code are shared following FAIR principles."
+abstract: "Journals increasingly require authors to share data and code, but checking whether submitted articles comply is effortful. Cooper and the BES Data and Code Hackathon Group (2026) manually coded data- and code-archiving practices in 1861 papers published in the seven British Ecological Society journals between 2017 and 2024, in a two-day hackathon with 145 participants. We examine to what extent this information can be extracted automatically from an article and its linked repositories. We used Metacheck, an open source tool that checks articles and repositories for best practices, to assess the same articles and compared the results with the manual coding. Agreement was 86% on whether data were available in a repository, 88% on whether code was archived, 96% on whether the data had a licence, and 73% on whether a README was present; where both found data or code, agreement on whether it could be downloaded was above 99%. We used an LLM (Claude Opus 5.5) to assist in reviewing every disagreement. About two in five of the papers where coders found data or code that Metacheck missed had not shared it in a way a machine can retrieve; most other disagreements reflect technical limitations of Metacheck, such as imperfect text extraction from PDF files or lack of support for a minority of repositories or file types. For READMEs, most disagreements reflect a difference in what counts as a README. The manual coding was not always right: for licences, the automated coding was correct in 46 of 57 disagreements. We also used Metacheck to run the code of 435 papers: 22% of 2874 scripts ran without an error, revealing common problems authors can resolve. Automated tools can find data and code that human coders miss, and could substantially reduce the time needed for such checks. While they cannot replace human judgement, automated tools can support workflows that check whether data and code are shared following FAIR principles."
 editor_options: 
   chunk_output_type: console
 ---
 
 ```{r}
 #| label: setup
-#| eval: FALSE
+#| include: false
 
-# install the dev version of Metacheck if not already done
+# prompt to install the dev version of Metacheck if not already done
 # Need to make this a .renv version - of the current version of metacheck
-pak::pkg_install("scienceverse/metacheck@dev")
-```
+if (requireNamespace("metacheck", quietly = TRUE) &&
+    packageVersion("metacheck") >= "0.4.3") {
+  library(metacheck)
+} else {
+  stop("Please install the development version of metacheck")
+  # pak::pkg_install("scienceverse/metacheck@dev")
+}
 
-```{r}
-#| label: libraries
-#| message: FALSE
-#| output: FALSE
-
-library(metacheck)
 library(dplyr)
 library(ggplot2)
 library(tidyr)
-library(stringr)
-library(flextable)
 
+# add all loaded packages to the bib file
 knitr::write_bib(
   .packages(),
   file = "documentation/package_citations.bib"
 )
 ```
 
+<!-- ************************************************************
+search for read.csv below or in sources files 
+it is untrue that this is the only chunk that loads data from disk
+************************************************************* -->
+
 ```{r}
-#| label: data
+#| label: data-load
 
 # The only chunk in this manuscript that loads data from disk. Every
 # later chunk uses one of the objects loaded here rather than its own
 # load()/readRDS() call, so there is exactly one place to look to see
 # what this manuscript reads and from where.
 
-# Every object below is a target of the pipeline in _targets.R. Run
-# targets::tar_make() to bring them up to date; quarto_render() alone does not.
-#
-# master_comparison is a strict superset of every other comparison-data
-# object this manuscript needs: Cooper et al.'s own columns, metacheck's
-# recreated mc_* columns, open_practices/ODDPub's columns, the
-# data_open/code_open accuracy_summary attribute, and recorder_ID
-# (joined against the DOI-corrected, deduplicated 1861-paper set --
-# using this rather than Cooper's raw CSV directly avoids a known
-# data-entry bug, see README.md's "known data-entry bug" section, where
-# 4 rows' doi field was mistakenly copy-pasted from a different paper's
-# row).
-#
-# TODO (open question, not yet resolved): master_comparison does not
-# carry a data_used/code_used column even though Cooper et al. coded
-# one -- metacheck has no module that answers "did this paper use
-# data/code" as a question distinct from "is there a data/code file
-# sitting in a linked repository" (see the Coding section's
-# mc_code_used discussion), but Cooper's own coded data_used/code_used
-# values could still be joined in here for the papers-that-use-data/
-# code denominators used below, rather than reconstructed from
-# data_availability/code_archived as a proxy.
-targets::tar_load(master_comparison, store = "_targets")
-accuracy_summary <- attr(master_comparison, "accuracy_summary")
-
-# comparison_statistics (confusion tables, sensitivity/specificity, the
-# two directional miss rates, and McNemar's test for every comparison
-# column, from master_comparison, n = 1861, agreements included, and the
-# individually-verified verdicts in the disagreement worklist) and
-# disagreement_cause_categories (a reproducible, keyword-based
-# categorization of each verified disagreement's root cause, computed
-# directly from the verdict comments rather than hand-tallied). Both
-# compare the three CORE Metacheck modules' (repo_check/data_check/
-# code_check) recreated columns against Cooper et al.'s ground truth --
-# see R/comparison_statistics.R and R/disagreement_cause_categories.R
-# for the full derivation.
-targets::tar_load(comparison_statistics, store = "_targets")
-results <- comparison_statistics$results
-verdict_tallies <- comparison_statistics$verdict_tallies
-targets::tar_load(disagreement_cause_categories, store = "_targets")
-cooper_right_causes <- disagreement_cause_categories$cooper_right_causes
-any_readme_dd_causes <- disagreement_cause_categories$any_readme_dd_causes
-data_availability_dd_causes <- disagreement_cause_categories$data_availability_dd_causes
-code_archived_mr_causes <- disagreement_cause_categories$code_archived_mr_causes
-
-# The disagreement worklist itself, for the qualitative review counts
-# quoted in the Empirical Comparison section (how many of the n
-# disagreements were individually reviewed).
-targets::tar_load(disagreement_worklist, store = "_targets")
-review <- disagreement_worklist$review
-# Where the mistake lies in each disagreement about code. These two columns are kept in the
-# review file by hand, and force(disagreement_worklist) reruns the render when that file changes.
-code_categories <- openxlsx::read.xlsx("data/review/disagreement_review_data.xlsx")[, c("code_category", "code_category_reason", "code_archived_verdict")]
-code_categories <- code_categories[!is.na(code_categories$code_category), ]
-n_code <- function(category) sum(code_categories$code_category == category)
-n_code_reason <- function(text) sum(grepl(text, code_categories$code_category_reason, fixed = TRUE))
-n_review <- nrow(review)
-n_reviewed <- sum(review$reviewed, na.rm = TRUE)
-review_status <- if (n_reviewed == n_review) {
-  sprintf("all %d disagreeing papers carry a verdict for every column on which they disagree", n_review)
-} else {
-  sprintf("%d of the %d disagreeing papers carry a verdict for every column on which they disagree; the other %d have not yet been reviewed",
-          n_reviewed, n_review, n_review - n_reviewed)
-}
-Review_status <- paste0(toupper(substr(review_status, 1, 1)), substring(review_status, 2))
-
-# side_by_side: master_comparison's own Cooper-vs-metacheck columns,
-# under the shorter name several later chunks use.
-side_by_side <- master_comparison
-
-# Papers Cooper et al. coded as having code on BOTH GitHub and Zenodo,
-# where Metacheck found code on only one of the two: each was reviewed
-# by hand against the paper's availability statement and Metacheck's
-# repository listing (code/03_comparing_results/
-# code_archive_github_zenodo_review_data.csv). The review must cover exactly
-# the papers the current comparison puts in that group.
-gz_review <- read.csv("data/review/code_archive_github_zenodo_review_data.csv",
-                      stringsAsFactors = FALSE)
-gz_one_ids <- side_by_side$article_id[
-  results$code_archive$github_zenodo_found %in% c("github_only", "zenodo_only")]
-if (!setequal(gz_review$article_id, gz_one_ids)) {
-  stop("code_archive_github_zenodo_review_data.csv does not match the current set of ",
-       "papers with code found on only one of GitHub and Zenodo")
-}
-gz_n <- function(category, missed = c("GitHub", "Zenodo")) {
-  sum(gz_review$category == category & gz_review$platform_missed %in% missed)
-}
-
-# Papers whose data platforms share nothing between Cooper et al. and
-# Metacheck: each was reviewed by hand against the availability statement
-# in Cooper et al.'s data, Metacheck's repository listing and DataCite/
-# Crossref author records (code/03_comparing_results/
-# data_archive_no_shared_platform_review_data.csv). For the deposit Cooper et
-# al. coded that Metacheck missed, missed_cause uses the same
-# root_cause_category codes as manual_repo_findability_audit_data.csv, so it
-# can be sorted into the same five clusters as the audit's table of reasons.
-none_review <- read.csv("data/review/data_archive_no_shared_platform_review_data.csv",
-                        stringsAsFactors = FALSE)
-none_ids <- side_by_side$article_id[results$data_archive$category %in% "none"]
-if (!setequal(none_review$article_id, none_ids)) {
-  stop("data_archive_no_shared_platform_review_data.csv does not match the current set of ",
-       "papers whose data platforms share nothing")
-}
-none_n <- function(group) sum(none_review$group %in% group)
-none_missed <- none_review[!is.na(none_review$missed_cause), ]
-none_cause <- function(causes, fair = NULL) {
-  keep <- none_missed$missed_cause %in% causes
-  if (!is.null(fair)) keep <- keep & none_missed$fair_machine_findable_in_principle %in% fair
-  sum(keep)
-}
-none_not_fair <- none_cause("DATA_OR_CODE_NOT_IN_FAIR_FORMAT") + none_cause("PLATFORM_NOT_SUPPORTED", "FALSE")
-none_unsupported_fair <- none_cause("PLATFORM_NOT_SUPPORTED", "TRUE")
-none_unsupported_format <- none_cause(c("CLASSIFIER_EXTENSION_GAP", "CLASSIFIER_MISTYPED"))
-none_limitation <- none_cause(c("EXTRACTION_GAP_DOI_GARBLED", "EXTRACTION_GAP_TEXT_MISSING",
-                                "SUPPORTED_PLATFORM_BUG", "CLASSIFIER_ARCHIVE_NOT_EXPANDED",
-                                "FILES_NOT_ENUMERATED"))
-stopifnot(none_not_fair + none_unsupported_fair + none_unsupported_format + none_limitation ==
-            nrow(none_missed))
-# Papers where Metacheck lists an extra data platform that is GitHub.
-n_data_mc_more_github <- sum(results$data_archive$category %in% "mc_more" &
-                               grepl("GitHub", side_by_side$mc_data_archive, fixed = TRUE) &
-                               !grepl("GitHub", side_by_side$data_archive, fixed = TRUE))
-
-# GitHub repositories of someone other than the paper's authors, and the
-# Metacheck answers they alone produced (R/third_party_repositories.R).
-targets::tar_load(third_party_repositories, store = "_targets")
-tp <- third_party_repositories
-
-# Cause code written into every verdict of the third review (2026-10-15,
-# code/03_comparing_results/review_2026-10-15/): COOPER_ERROR,
-# METACHECK_BUG, NOT_FAIR, UNSUPPORTED_FAIR_PLATFORM, DIFFERENT_DEFINITION or NONE.
-verdict_cause <- function(col) {
-  cm <- review[[paste0(col, "_comment")]]
-  ifelse(grepl("CAUSE: ", cm, fixed = TRUE), sub("^.*CAUSE: ([A-Z_]+).*$", "\\1", cm), NA_character_)
-}
-n_cause <- function(col, cause, verdict = c("COOPER_RIGHT", "METACHECK_RIGHT", "BOTH_DEFENSIBLE")) {
-  sum(verdict_cause(col) %in% cause & review[[paste0(col, "_verdict")]] %in% verdict)
-}
-# Coder-right data_download disagreements whose review comment matches a pattern.
-n_dl_right <- function(pattern) {
-  sum(review$data_download_verdict %in% "COOPER_RIGHT" &
-        grepl(pattern, review$data_download_comment, perl = TRUE))
-}
-# DIFFERENT_DEFINITION occurs only for README: Cooper et al. asked about a README or metadata,
-# whereas Metacheck looks for a README file.
-stopifnot(!any(unlist(review[paste0(c("data_availability", "data_archive", "data_license", "data_download",
-                                      "code_archived", "code_archive", "code_download"),
-                                    "_verdict")]) %in% c("DIFFERENT_DEFINITION", "UNCLEAR")),
-          !any(review$any_readme_verdict %in% "UNCLEAR"))
-
-# README disagreements by direction, and Cooper et al.'s uncoded README answers.
-readme_cooper_yes <- review$cooper_any_readme %in% TRUE
-n_readme <- function(cooper_yes, verdict) sum(readme_cooper_yes == cooper_yes & review$any_readme_verdict %in% verdict)
-n_readme_description <- sum(readme_cooper_yes & review$any_readme_verdict %in% "DIFFERENT_DEFINITION" &
-                              grepl("landing page|description|abstract", review$any_readme_comment, ignore.case = TRUE))
-readme_uncoded <- is.na(master_comparison$cooper_any_readme)
-n_readme_uncoded <- sum(readme_uncoded)
-n_readme_uncoded_unsure <- sum(readme_uncoded & (master_comparison$data_README %in% "Unsure" |
-                                                   master_comparison$code_README %in% "Unsure"))
-n_readme_uncoded_archived <- sum(readme_uncoded & (master_comparison$data_availability %in% "Yes" |
-                                                     master_comparison$code_archived %in% "Yes"))
-# The 16 papers whose own R-package repository the R-package-source-tree
-# exclusion emptied (RevGadgets, BaBA, m2b, RRPP, actel, scampr, MINOTAUR,
-# LadderFuelsR, biomonitoR, EcoEnsemble, fossilsim, frair, tRophicPosition,
-# sabinaNSDM, bef, phylomice): how many now have their code found.
-rpkg16_ids <- c("10_1111_2041_210x_13750", "10_1111_1365_2664_13806", "10_1111_2041_210x_12989",
-                "10_1111_2041_210x_13029", "10_1111_2041_210x_13503", "10_1111_2041_210x_14252",
-                "10_1111_2041_210x_12774", "10_1111_2041_210x_14427", "10_1111_1365_2664_13795",
-                "10_1111_2041_210x_14148", "10_1111_2041_210x_13170", "10_1111_2041_210x_12784",
-                "10_1111_2041_210x_13009", "10_1111_2041_210x_14417", "10_1111_1365_2435_13455",
-                "10_1111_1365_2435_14552")
-stopifnot(length(unique(rpkg16_ids)) == 16, all(rpkg16_ids %in% master_comparison$article_id))
-n_rpkg16_resolved <- sum(master_comparison$mc_code_archived[match(rpkg16_ids, master_comparison$article_id)] %in% TRUE)
-n_readme_in_archive <- sum(review$any_readme_verdict %in% "COOPER_RIGHT" &
-                             grepl("README is inside|README sits inside|tar archive|\\.rar|\\.7z|ZIP64",
-                                   review$any_readme_comment))
-
-# Data download: papers whose data Cooper et al.'s coders downloaded, and
-# what Metacheck answered for them (NA = it downloaded no data file at all,
-# so the paper drops out of the comparison).
-dl_cooper_yes <- master_comparison$data_download %in% c("Yes", "Yes, but not all data")
-n_dl_cooper_yes <- sum(dl_cooper_yes)
-n_dl_mc_true <- sum(dl_cooper_yes & master_comparison$mc_data_download %in% TRUE)
-n_dl_mc_na <- sum(dl_cooper_yes & is.na(master_comparison$mc_data_download))
-
-# How OddPub/open_practices classify the papers EXCLUDED from the
-# data_open/code_open accuracy_summary comparison above -- split into
-# the two structurally different reasons a paper is excluded (left
-# unscored despite the question applying, vs. explicitly given Cooper
-# et al.'s own "Maybe" label for needing specific software or being too
-# large), since these are not the same kind of missingness and may
-# behave differently. There is no human ground truth for either group,
-# so this cannot be scored as correct/incorrect, only reported as each
-# tool's own claim rate on papers the human coders did not give a clear
-# Yes/No for.
-#
-# "Blank" is restricted to papers where data_open/code_open is NA *and*
-# the question should have applied (data_availability/code_archived ==
-# "Yes") -- most blank data_open/code_open rows are blank simply
-# because data/code was never archived in the first place (the
-# question was never asked), which is not "left unscored" and would
-# otherwise swamp this count, especially for code (1089 of 1329 blank
-# code_open rows have code_archived == "No", only 49 have
-# code_archived == "Yes" and are genuinely missing an answer).
-blank_data_open <- is.na(side_by_side$data_open) &
-  !is.na(side_by_side$data_availability) & side_by_side$data_availability == "Yes"
-n_blank_data_open <- sum(blank_data_open)
-n_oddpub_open_blank_data <- sum(side_by_side$oddpub_data_open[blank_data_open], na.rm = TRUE)
-n_mc_open_blank_data <- sum(side_by_side$mc_data_open[blank_data_open], na.rm = TRUE)
-
-ambig_data_open <- !is.na(side_by_side$data_open) &
-  side_by_side$data_open == "Needs specific software or too large"
-n_ambig_data_open <- sum(ambig_data_open)
-n_oddpub_open_ambig_data <- sum(side_by_side$oddpub_data_open[ambig_data_open], na.rm = TRUE)
-n_mc_open_ambig_data <- sum(side_by_side$mc_data_open[ambig_data_open], na.rm = TRUE)
-
-blank_code_open <- is.na(side_by_side$code_open) &
-  !is.na(side_by_side$code_archived) & side_by_side$code_archived == "Yes"
-n_blank_code_open <- sum(blank_code_open)
-n_oddpub_open_blank_code <- sum(side_by_side$oddpub_code_open[blank_code_open], na.rm = TRUE)
-n_mc_open_blank_code <- sum(side_by_side$mc_code_open[blank_code_open], na.rm = TRUE)
-
-ambig_code_open <- !is.na(side_by_side$code_open) &
-  side_by_side$code_open == "Maybe if I had the right software"
-n_ambig_code_open <- sum(ambig_code_open)
-n_oddpub_open_ambig_code <- sum(side_by_side$oddpub_code_open[ambig_code_open], na.rm = TRUE)
-n_mc_open_ambig_code <- sum(side_by_side$mc_code_open[ambig_code_open], na.rm = TRUE)
-
-# The few columns of the module tables this manuscript reads (code/R/slim_extraction.R).
-targets::tar_load(manuscript_data_slim, store = "_targets")
-repo_metadata <- manuscript_data_slim$repo_metadata
-structure_slim <- manuscript_data_slim$structure_slim
-code_table_slim <- manuscript_data_slim$code_table_slim
-
-# Small formatting helpers used throughout the Empirical Comparison
-# section, so every percentage/test-statistic there is computed rather
-# than typed.
-pct1 <- function(x) sprintf("%.1f", x * 100)
-pfmt <- function(p) if (p < .001) "< .001" else sprintf("= %.3f", p)
-mcnemar_str <- function(r) {
-  if (is.null(r$mcnemar_stat) || is.na(r$mcnemar_stat)) return("not computable")
-  sprintf("$\\chi^2$(%d) = %.2f, *p* %s", r$mcnemar_df, r$mcnemar_stat, pfmt(r$mcnemar_p))
-}
-vt  <- function(tallies, verdict) { n <- unname(tallies[verdict]); if (is.na(n)) 0L else n }
-cc  <- function(tab, bucket) { n <- unname(tab[bucket]); if (is.na(n)) 0L else n }
+source("code/data_load.R")
 ```
 
 # Introduction
 
-The last two decades have seen a notable culture change around open science practices. Universities, journals, and funders increasingly expect researchers to engage in open science practices. One open science practice that has become especially widely required is data and code sharing. The goal of data and code sharing is to facilitate re-use, and to increase transparency. MAny funders have started to require data management plans that specify where and how data and code will be made available for re-use, and submission guidelines for journals often require that data and code underlying the claims in a manuscript are shared if possible. The British Ecological Society, for example, requires, "as a condition for publication, that all data supporting the results in papers published in its journals are archived in an appropriate public archive offering open access and guaranteed preservation", and for theoretical papers that "the underlying model code must be archived" (https://besjournals.onlinelibrary.wiley.com/hub/data_archiving_policy).
+The last two decades have seen a notable culture change around open science practices. Universities, journals, and funders increasingly expect researchers to engage in open science practices. One open science practice that has become especially widely required is data and code sharing. The goal of data and code sharing is to facilitate re-use, and to increase transparency. Many funders have started to require data management plans that specify where and how data and code will be made available for re-use, and submission guidelines for journals often require that data and code underlying the claims in a manuscript are shared if possible. The British Ecological Society, for example, requires, "as a condition for publication, that all data supporting the results in papers published in its journals are archived in an appropriate public archive offering open access and guaranteed preservation", and for theoretical papers that "the underlying model code must be archived" (<https://besjournals.onlinelibrary.wiley.com/hub/data_archiving_policy>).
 
-Although the requirements to share data and code are clear, checking whether authors follow through on them is difficult. At the BES journals, for example, journal staff check each accepted paper to ensure that data and code are archived, but "do not have the skills or capacity to guarantee" requirements such as completeness [@cooper2026, p. 1955]. Manually checking data and code files is a time-consuming task that requires expertise about best practices in data and code sharing. Cooper and the BES Data and Code Hackathon Group [-@cooper2026] assessed data- and code-archiving practices across the seven journals published by the British Ecological Society (BES). They found that most manuscripts in which data was used also shared the data, but code sharing was less common, and even when data and code were shared, best practices were often not followed. About a third of data and/or code repositories lacked a README file, and code was not always well-annotated. Studies in other fields show that data and code are often not shared, even when journals require it [@hamilton_how_2022; @li_formalistic_2026], and that when code is shared, rerunning it often fails or does not reproduce the reported results [@trisovic_largescale_2022; @obels2020; @cruwell_whats_2023; @miske_investigating_2026]. These findings strongly suggest that it would be beneficial if data and code is reviewed before a manuscript is published.
+Although the requirements to share data and code are clear, checking whether authors follow through on them is difficult. At the BES journals, for example, journal staff check each accepted paper to ensure that data and code are archived, but "do not have the skills or capacity to guarantee" requirements such as completeness [@cooper2026, p. 1955]. Manually checking data and code files is a time-consuming task that requires expertise about best practices in data and code sharing. Cooper and the BES Data and Code Hackathon Group [-@cooper2026] assessed data- and code-archiving practices across the seven journals published by the British Ecological Society (BES). They found that most manuscripts in which data was used also shared the data, but code sharing was less common, and even when data and code were shared, best practices were often not followed. About a third of repositories lacked a README file, and code was not always well-annotated. Studies in other fields show that data and code are often not shared, even when journals require it [@hamilton_how_2022; @li_formalistic_2026], and that when code is shared, rerunning it often fails or does not reproduce the reported results [@trisovic_largescale_2022; @obels2020; @cruwell_whats_2023; @miske_investigating_2026]. These findings strongly suggest that it would be beneficial if data and code are reviewed before a manuscript is published.
 
 Some journals manually check data and code before an article is published. This practice is well established in economics journals, where a dedicated Data Editor oversees the reproduction of results based on data and code [@vilhuber_report_2025]. Manual checks are laborious and delay the publication process. It is therefore not surprising that researchers are exploring automated ways to check whether data and code are shared, and whether they are usable. For example, the Scalable Infrastructure for Validation of Computational Social Science Research (SIVACOR), a project led by the Data Editor of the American Economic Association, examines whether it is possible to automatically verify the computational reproducibility of data and code. The extent to which automated processes can reduce the workload associated with checks of data and code sharing practices is an open question. Automation has the potential to reduce the workload of manual checks, but it is not clear whether and where automated tools can achieve the same level of accuracy as human coders.
 
-In this paper we will examine how Metacheck, a novel open source tool that checks best practices in data and code sharing, might assist in the process of checking whether data and code are shared. We will compare the output of Metacheck against the manual coding of Cooper et al. [-@cooper2026], available at https://github.com/nhcooper123/reproduce-reuse-recycle, which we treat as a careful human comparison rather than as a ground truth that is correct by definition. It is clear that the human coders exerted considerable effort over the 2-day hackathon to code the 1861 papers, where 145 people coded a median of `r median(as.numeric(table(master_comparison$recorder_ID)))` (min = `r min(as.numeric(table(master_comparison$recorder_ID)))`, max = `r max(as.numeric(table(master_comparison$recorder_ID)))`) manuscripts. Cooper et al.'s protocol covered the seven journals published by the British Ecological Society (BES), coding papers published between 2017 and 2024 on eight groups of questions per paper. The team coded whether data and code were used and archived, where they were archived, whether the archived files could be located, downloaded, and opened, what file formats were used, whether a README was present and how useful it was, how complete the archived data were, how well-annotated the code was, and whether the data and code were citable (i.e., had a DOI and a licence).
+```{r}
+#| label: cooper-summary
+n_coded <- as.numeric(table(master_comparison$recorder_ID))
+n_coders <- length(n_coded)
+n_papers <- sum(n_coded)
+median_per_coder <- median(n_coded)
+min_per_coder <- min(n_coded)
+max_per_coder <- max(n_coded)
+```
+
+In this paper we will examine how Metacheck, a novel open source tool that checks best practices in research reporting, including data and code sharing, might assist in the process of checking whether data and code are shared. We will compare the output of Metacheck against the manual coding of Cooper et al. [-@cooper2026], available at <https://github.com/nhcooper123/reproduce-reuse-recycle>, which we treat as a careful human comparison rather than as a ground truth that is correct by definition. It is clear that the human coders exerted considerable effort over the 2-day hackathon to code the `r n_papers` papers, where `r n_coders` people coded a median of `r median_per_coder` (min = `r min_per_coder`, max = `r max_per_coder`) manuscripts. Cooper et al.'s protocol covered the seven journals published by the British Ecological Society (BES), coding papers published between 2017 and 2024 on eight groups of questions per paper. The team coded whether data and code were used and archived, where they were archived, whether the archived files could be located, downloaded, and opened, what file formats were used, whether a README was present and how useful it was, how complete the archived data were, how well-annotated the code was, and whether the data and code were citable (i.e., had a DOI and a licence).
 
 Coding the presence or absence of data and/or code files is exactly the kind of time-consuming task that automated tools such as Metacheck [@R-metacheck] aim to support. If an automated tool could complete some of Cooper et al.'s eight coding questions at comparable accuracy to human coders, it would substantially reduce the workload that is currently required to check if researchers follow best practices in data and code sharing. Metacheck [@R-metacheck] is a modular, open-source tool that uses text search, rule-based classification, APIs, and optional large language models to extract information about research practices from scientific manuscripts and their associated repositories. Metacheck's `repo_check`, `data_check`, and `code_check` modules perform automated checks that closely resemble the classifications that Cooper et al. [-@cooper2026] asked their human coders to perform.
 
-In this paper, we use Cooper et al.'s openly archived data as the comparison coding [@cooper2026zenodo], and for each of the eight groups of questions in their protocol, we summarize what Cooper et al. found, and examine whether that question can currently be automated with sufficient accuracy. Where the two codings disagree, we had Claude Opus 5.5 review each case to see which is correct, rather than assuming the human coding is right by definition. The results generated by Metacheck are completely automated, do not rely on AI, and can be reproduced by re-running the code. Human input was limited to a few settings, which are recorded in the code: two papers whose repositories hold large archives were given a larger download limit than the 2000 MB used for all other papers, and for one paper, whose repository holds 23 GB of data, the files were listed but not downloaded. Re-running the code also requires access keys for the APIs of GitHub, Dryad, OSF, and Zenodo. Unlike a validation study that reports a single accuracy percentage, our goal here is to make transparent where the current version of Metacheck can reduce the manual burden of this kind of meta-scientific data collection, and where it cannot.
+In this paper, we use Cooper et al.'s openly archived data as the comparison coding [@cooper2026zenodo], and for each of the eight groups of questions in their protocol, we summarize what Cooper et al. found, and examine whether that question can currently be automated with sufficient accuracy. Where the two codings disagree, we used Claude Opus 5.5 to assist reviewing each case to see which is correct, rather than assuming the human coding is right by definition. The results generated by Metacheck are completely automated, do not rely on AI, and can be reproduced by re-running the code. Human input was limited to a few settings, which are recorded in the code: two papers whose repositories hold large archives were given a larger download limit than the 2000 MB used for all other papers, and for one paper, whose repository holds 23 GB of data, the files were listed but not downloaded. Re-running the code also requires access keys for the APIs of GitHub, Dryad, OSF, and Zenodo. Unlike a validation study that reports a single accuracy percentage, our goal here is to make transparent where the current version of Metacheck can reduce the manual burden of this kind of meta-scientific data collection, and where it cannot.
 
-As an automated tool, Metacheck relies on data and code being shared according to the FAIR principles, the idea being that "all research objects should be Findable, Accessible, Interoperable and Reusable (FAIR) both for machines and for people" [@wilkinson_fair_2016, p. 3]. Human coders can retrieve information that is not accessible by a machine. For example, if authors share their data as a table in a PDF file in the supplementary material, the data are not FAIR: a table in a PDF cannot be read reliably by a machine, and the file has no persistent identifier of its own. Cooper and colleagues did not limit their coding to FAIR data, and as a consequence, Metacheck will always miss some information that human coders found. On the other hand, machines can find some information that human coders miss. For example, Metacheck found information about licenses, READMEs, and repositories that human coders failed to classify. Throughout this project we will also reflect on practical challenges when developing software that attempts to automatically retrieve FAIR data, and the implications for best practices in data and code sharing.
+Automated tools perform most reliably on data and code being shared according to the FAIR principles, the idea being that "all research objects should be Findable, Accessible, Interoperable and Reusable (FAIR) both for machines and for people" [@wilkinson_fair_2016, p. 3]. Human coders can retrieve information that is not accessible by a machine. For example, if authors share their data as a table in a PDF file in the supplementary material, the data are not FAIR: a table in a PDF cannot be read reliably by a machine, and the file has no persistent identifier of its own. Cooper and colleagues did not limit their coding to FAIR data, and as a consequence, Metacheck will always miss some information that human coders found. On the other hand, machines can find some information that human coders miss. For example, Metacheck found information about licenses, READMEs, and repositories that human coders failed to classify. Throughout this project we will also reflect on practical challenges when developing software that attempts to automatically retrieve FAIR data, and the implications for best practices in data and code sharing.
 
 # Methods
 
@@ -364,257 +133,34 @@ We obtained the list of paper DOIs, journals, and years from the cleaned dataset
 
 ```{r}
 #| label: res_modules
-#| eval: FALSE
+#| eval: false
 
 # The chain of modules per paper, run by code/run_metacheck.R, which creates
 # data/metacheck_results.rds. Run it from the repository root:
-#   Rscript code/run_metacheck.R
+source("code/run_metacheck.R")
 ```
 
+<!-- **********************************************
+I can't find where any of the objects created by 
+license_value_check are used in the manuscript or other code
+If I comment it out, nothing seems to happen
+*********************************************** -->
 ```{r}
 #| label: license-value-check
 
-# Computed from repo_metadata (loaded in the data chunk above, from
-# manuscript_data_slim) to check a pattern visible to anyone
-# inspecting repo_metadata directly: many Dryad-hosted repositories
-# report the identical license string. `license` here is read verbatim
-# from each platform's own API response (see mc_data_doi/mc_data_license
-# below) -- nothing here
-# rewrites or standardises it.
-#
-# is_dryad_url() reads its prefix list from metacheck's own
-# .dryad_doi_prefixes() rather than hardcoding only the single most
-# common prefix (10.5061) -- an earlier version of this chunk did exactly
-# that and, as a result, miscounted 14 genuine Dryad repositories (real
-# datadryad.org deposits under one of Dryad's other institutional DOI
-# prefixes, e.g. 10.25338, 10.7291, 10.6078 -- confirmed live, each
-# resolves to datadryad.org) as "non-Dryad", which in turn made the
-# prose below wrongly claim the CC0-1.0 string "never appears for a
-# non-Dryad repository". This is the same multi-prefix detection gap
-# Appendix A.6 documents and fixes for repo_check's own Dataverse
-# DOI-prefix allowlist and for 03_recreate_cooper_columns.R's platform
-# labelling -- this chunk had an independent copy of the same narrow,
-# single-prefix bug that neither of those fixes touched, since it lives
-# only here in the manuscript's own license-value-check chunk.
-# One row per repository: repo_metadata has one row per (paper,
-# repository), so a repository cited by two papers would otherwise be
-# counted twice in "licensed Dryad repositories".
-rmeta <- repo_metadata |>
-  dplyr::summarise(license = if (all(is.na(license))) NA_character_ else license[!is.na(license)][1],
-                   .by = repo_url)
-dryad_prefix_pattern <- paste(gsub("\\.", "\\\\.", metacheck:::.dryad_doi_prefixes()), collapse = "|")
-is_dryad_url <- function(x) grepl(paste0("datadryad\\.org|(", dryad_prefix_pattern, ")/dryad|doi\\.org/(", dryad_prefix_pattern, ")"), x, ignore.case = TRUE)
-cc0_url <- "https://spdx.org/licenses/CC0-1.0.html"
-n_dryad_total <- sum(is_dryad_url(rmeta$repo_url))
-n_dryad_licensed <- sum(is_dryad_url(rmeta$repo_url) & !is.na(rmeta$license))
-n_dryad_cc0 <- sum(rmeta$license %in% cc0_url & is_dryad_url(rmeta$repo_url), na.rm = TRUE)
-n_cc0_total <- sum(rmeta$license %in% cc0_url, na.rm = TRUE)
-n_nondryad_cc0 <- n_cc0_total - n_dryad_cc0
+# source("code/license_value_check.R")
 ```
 
 ```{r}
 #| label: data-code-archiving-counts
 
-# Computed from side_by_side (for the Cooper-side and
-# unsupported-repository counts) and structure_slim/code_table_slim
-# (for the metacheck-side counts -- both loaded in the data chunk
-# above, from manuscript_data_slim.RData), and from the host lists the
-# installed metacheck package itself uses to recognise a repository
-# platform (metacheck:::.dataverse_hosts(), etc.) -- nothing in this
-# chunk is typed by hand.
-#
-# TODO (open question, not yet resolved): accuracy_summary (OddPub vs.
-# open_practices accuracy against Cooper's data_open/code_open) is
-# computed by 02_create_comparison_data/03_build_master_comparison.R
-# and attached to master_comparison.rds as an R attribute rather than
-# as ordinary columns/a separate object. An attribute is easy to lose
-# silently (it does not survive an unguarded subset or a naive re-save,
-# and does not show up in a plain View()/str() of the data frame's
-# columns) -- consider having that script return accuracy_summary as
-# its own named list element, or its own small .rds, instead.
+source("code/data_code_archiving.R")
 
-n_cooper_data    <- sum(side_by_side$data_availability %in% "Yes")
-n_cooper_code    <- sum(side_by_side$code_archived %in% "Yes")
-n_cooper_either  <- sum(side_by_side$data_availability %in% "Yes" | side_by_side$code_archived %in% "Yes")
-
-# mc_data_availability's own scope: at least one linked repository with
-# at least one file of any type found in the main text.
-n_mc_repo_found  <- sum(side_by_side$mc_data_availability, na.rm = TRUE)
-
-# "Contained data"/"contained code": at least one file data_check/
-# code_check classified as data/code respectively -- broader than
-# mc_data_format's own tabular_usable-only scope, since "contained data"
-# in this sentence means any data-classified file, not only a file that
-# parsed successfully as a usable table.
-papers_with_data <- unique(structure_slim$paper_id[structure_slim$data_type == "data"])
-papers_with_code <- unique(code_table_slim$paper_id)
-n_mc_data   <- length(papers_with_data)
-n_mc_code   <- length(papers_with_code)
-n_mc_either <- length(union(papers_with_data, papers_with_code))
-
-# Unique repositories (repo_url) holding at least one data- or
-# code-classified file, across the whole corpus.
-repo_urls_with_data <- unique(structure_slim$repo_url[structure_slim$data_type == "data"])
-repo_urls_with_code <- unique(code_table_slim$repo_url)
-n_repos_either <- length(union(repo_urls_with_data, repo_urls_with_code))
-
-# The two DIRECTIONAL disagreement counts between Cooper's coding and
-# metacheck's "has data or code" judgement, computed directly from the
-# two id sets rather than as a naive difference of their sizes
-# (n_cooper_either - n_mc_either is NOT the same as
-# length(setdiff(cooper_ids, mc_ids)) whenever mc finds papers cooper
-# didn't -- it silently nets the two directions against each other).
-cooper_either_ids <- side_by_side$article_id[side_by_side$data_availability %in% "Yes" | side_by_side$code_archived %in% "Yes"]
-mc_either_ids <- union(papers_with_data, papers_with_code)
-n_cooper_yes_mc_no <- length(setdiff(cooper_either_ids, mc_either_ids))
-n_mc_yes_cooper_no <- length(setdiff(mc_either_ids, cooper_either_ids))
-n_both_yes_either <- length(intersect(cooper_either_ids, mc_either_ids))
-n_either_total_disagree <- n_cooper_yes_mc_no + n_mc_yes_cooper_no
-
-# Of the n_cooper_yes_mc_no papers (Cooper says data/code exists,
-# metacheck found none), how many trace to repo_check finding no
-# repository at all versus repo_check finding a real repository whose
-# files data_check/code_check simply did not classify as data or code
-# (an emptier, but not zero, disagreement -- the reverse of "repository
-# not detected"). Both counts below are restricted to gap_ids itself
-# (the n_cooper_yes_mc_no set), so they are mutually exclusive subsets
-# of it and sum to at most n_cooper_yes_mc_no. A paper where Cooper's own
-# data_availability/code_archived columns are both NA (e.g.
-# 10_1002_2688_8319_12029) has no "Yes" judgement to disagree with at all,
-# so it is correctly excluded here.
-a6_cats_ids_check <- read.csv("data/review/repo_not_detected_categorization_data.csv", stringsAsFactors = FALSE)
-a6_cats_ids_check <- unique(a6_cats_ids_check$article_id)
-gap_ids <- setdiff(cooper_either_ids, mc_either_ids)
-n_repo_not_found_of_gap <- sum(gap_ids %in% a6_cats_ids_check)
-n_repo_found_but_no_data_or_code <- sum(
-  gap_ids %in% side_by_side$article_id[side_by_side$mc_data_availability %in% TRUE]
-)
-
-# n_mc_no_repo_corpus_wide is EVERY paper repo_check found nothing for,
-# out of the full 1861-paper corpus, regardless of what Cooper coded --
-# this is NOT the same number as n_mc_missed_reviewed (the row count of
-# repo_not_detected_categorization_data.csv, computed further below), which is
-# restricted to the subset of those "found nothing" papers that were ALSO
-# a disagreement with Cooper (i.e. Cooper coded that paper as having data
-# or code). Every row in the categorization file is a Cooper=Yes
-# disagreement -- the remaining n_mc_no_repo_corpus_wide -
-# n_mc_missed_reviewed papers are cases where repo_check found nothing AND Cooper agreed there
-# was nothing to find, so they were correctly never disagreements and
-# never entered the categorization file at all. (This file's row count
-# has changed more than once over the course of this project as further
-# fixes and rechecks were applied -- re-verify this count directly
-# against the CSV rather than trusting a number written here, since this
-# comment itself went stale once already.)
-#
-# The categorization file was cleaned once (2026-09-29) to remove 38
-# rows that had gone stale: they described a "repository not detected"
-# state from before this session's metacheck platform fixes (4TU,
-# Dataverse DOI-prefix, Dryad, Figshare, DSpace7, DataOne) were rerun,
-# but repo_check now genuinely finds a repository for all 38 --
-# confirmed directly against current mc_data_availability for every row
-# in the file, not just the ones already known to be affected. A random
-# sample of the remaining rows was independently spot-checked against
-# the current repo_check$table output and found to still accurately
-# describe "repo_check finds nothing" for each one.
-n_mc_no_repo_corpus_wide <- sum(!side_by_side$mc_data_availability, na.rm = TRUE)
-
-# Unique repositories reachable through metacheck's shared-API backends
-# (Dataverse, DSpace 7, DSpace 6/legacy, DataOne, Figshare), each
-# individually confirmed against a real host rather than guessed from a
-# generic pattern, plus its dedicated single-platform integrations.
-# n_dedicated_platforms counts each distinct _links()-style detector
-# function in the vendored source (code/data/reproducibility_check/vendor/
-# metacheck/R/archive-*.R) that recognizes and queries one specific
-# platform: 4TU, AsPredicted, Dryad, FSD, GitHub, GitLab, Mendeley Data,
-# OSF, ResearchBox, ReShare, and Zenodo (11 platforms). This deliberately
-# excludes archive-local.R (local files, not a repository platform) and
-# archive-zenodo-upload.R (an upload helper, not a detection integration),
-# and excludes PsychArchives, whose host (www.psycharchives.org) is one of
-# the DSpace-legacy hosts counted in n_dspace_legacy_hosts below rather
-# than a separate dedicated integration.
-dataverse_hosts <- union(metacheck:::.dataverse_hosts(), names(metacheck:::.dataverse_doi_prefix_hosts()))
-dspace7_hosts <- metacheck:::.dspace7_hosts()
-dspace_legacy_hosts <- metacheck:::.dspace_legacy_hosts()
-dataone_hosts <- vapply(metacheck:::.dataone_hosts(), `[[`, "", "host")
-# The Figshare table maps a DOI prefix to a host, so the hosts are its values (the
-# Dataverse table above runs the other way, host to prefix, so there the names are hosts).
-figshare_hosts <- union(metacheck:::.figshare_vanity_hosts(), unlist(metacheck:::.figshare_doi_prefix_hosts(), use.names = FALSE))
-n_dataverse_hosts <- length(dataverse_hosts)
-n_dspace7_hosts   <- length(dspace7_hosts)
-n_dspace_legacy_hosts <- length(dspace_legacy_hosts)
-n_dataone_hosts   <- length(dataone_hosts)
-n_figshare_hosts  <- length(figshare_hosts)
-n_dedicated_platforms <- 11L
-# A host can be in more than one list (dspace.ut.ee is queried through both
-# DSpace APIs), so the total counts each host once rather than summing the
-# per-family counts.
-n_unique_repos <- length(unique(c(dataverse_hosts, dspace7_hosts, dspace_legacy_hosts,
-                                  dataone_hosts, figshare_hosts))) + n_dedicated_platforms
-
-# Papers whose ONLY Cooper-coded data_archive value(s) fall outside
-# metacheck's supported-platform categories (Cooper's own "Other
-# repo/database" catch-all, or "Personal website"/"Supplementary
-# materials", neither of which is an externally checkable repository at
-# all) -- and, of those, how many metacheck's repo_check consequently
-# found nothing at all for.
-unsupported_labels <- c("Other repo/database", "Personal website", "Supplementary materials")
-is_unsupported_only <- !is.na(side_by_side$data_archive) &
-  vapply(strsplit(side_by_side$data_archive, ";"),
-         function(v) all(trimws(v) %in% unsupported_labels), logical(1))
-n_unsupported_repo <- sum(is_unsupported_only)
-n_unsupported_repo_and_mc_missed <- sum(is_unsupported_only & !side_by_side$mc_data_availability, na.rm = TRUE)
-
-# Three-way breakdown of those n_unsupported_repo papers by Cooper's own
-# data_archive label. "Personal website" and "Supplementary materials"
-# are not FAIR by this paper's own definition regardless of what
-# metacheck supports (a machine cannot reliably find/access data at an
-# arbitrary URL or embedded in the article's own supplementary file).
-# "Other repo/database" is Cooper's catch-all label and is NOT the same
-# thing as "a repository metacheck genuinely does not support" -- her
-# coders used it for any repository outside their own named platform
-# list, which includes real OSF/Dryad/Figshare/Zenodo deposits their
-# coding scheme simply had no more specific box for, and metacheck
-# supports every one of those. A subset uses more than one of these
-# labels together (e.g. "Supplementary materials;Other repo/database"),
-# so the two counts below do not sum to n_unsupported_repo.
-split_labels <- strsplit(side_by_side$data_archive[is_unsupported_only], ";")
-n_unsupported_personal_web <- sum(vapply(split_labels, function(v) "Personal website" %in% trimws(v), logical(1)))
-n_unsupported_supp_mat     <- sum(vapply(split_labels, function(v) "Supplementary materials" %in% trimws(v), logical(1)))
-
-# 03_comparing_results/repo_not_detected_categorization_data.csv (see A.6's own
-# fuller loading comment below, where it is reused as a6_cats) is the
-# only place in this project a repository's platform was actually
-# verified one paper at a time (reading the paper's own text and, where
-# relevant, querying the cited platform's own API) -- rather than
-# inferred from Cooper's own coded label the way the Other-repo/database
-# count above was. UNSUPPORTED_REPO is that verified count: a paper whose
-# individually-checked citation genuinely names a platform metacheck has
-# no backend for at all, as opposed to a real OSF/Dryad/Zenodo/Figshare
-# repository that only *looked* unsupported because of how Cooper's
-# coders labelled it, or a paper metacheck simply failed to detect for
-# an unrelated reason (a truncated DOI, an embargo, a text-extraction
-# artefact -- see A.6's own category table).
-a6_cats_preview <- read.csv("data/review/repo_not_detected_categorization_data.csv", stringsAsFactors = FALSE)
-a6_cats_preview <- a6_cats_preview[!duplicated(a6_cats_preview$article_id), ]
-n_genuinely_unsupported <- length(unique(a6_cats_preview$article_id[a6_cats_preview$category == "UNSUPPORTED_REPO"]))
-
-# Breakdown of the hard, repo_check-outcome-based count -- every paper
-# with at least one "repository not detected" disagreement (the same
-# population the table of reasons below summarises; a6_cats_preview here is the
-# identical CSV that table's own a6_cats loads later, read once more here so
-# this earlier reconciling paragraph has it available). This replaces an
-# earlier version of this paragraph that was anchored to
-# n_unsupported_repo (a softer count built only from Cooper's own
-# data_archive label text -- a paper counted if EVERY label she gave it
-# was "Other repo/database"/"Personal website"/"Supplementary
-# materials" -- which said nothing about what repo_check actually did
-# and, being label-based rather than outcome-based, never summed to
-# that table's own total). nrow(a6_cats_preview) IS its total.
-n_mc_missed_reviewed <- nrow(a6_cats_preview)
-n_mc_missed_unsupported_repo <- sum(a6_cats_preview$category == "UNSUPPORTED_REPO")
-n_mc_missed_genbank <- sum(a6_cats_preview$category == "NCBI_GENBANK")
-n_mc_missed_supported_bug <- sum(a6_cats_preview$category %in% c("SUPPORTED_PLATFORM_BUG", "SUPPORTED_PLATFORM_MISSED"))
-n_mc_missed_other_named <- n_mc_missed_reviewed - n_mc_missed_unsupported_repo - n_mc_missed_genbank - n_mc_missed_supported_bug
+# pull out frequently-used data structures for more readable inline R
+opdata <- accuracy_summary$oddpub_data
+opcode <- accuracy_summary$oddpub_code
+mcdata <- accuracy_summary$metacheck_data
+mccode <- accuracy_summary$metacheck_code
 ```
 
 ## 1. Does the paper use data/code? If so, are they archived?
@@ -623,9 +169,11 @@ Cooper and colleagues reported that "Of the 1861 papers in our dataset, 93% (n =
 
 ### Oddpub and Open Practices Check
 
-OddPub [@riedel_oddpub_2020] is a tool that searches text for keywords related to data and code sharing. The Metacheck Open Practices module does the same, but is intentionally over-inclusive, which means it is designed to find more data or code sharing statements, while also returning more false positives. We compared the automatic text-based judgements from OddPub and the Open Practices module to Cooper and colleagues' human coding of whether data and code were openly shared (their `data_open`/`code_open` columns), treating "Yes" (and for data "Yes, but not all files") as open and "No" as not open, and excluding papers where the coders used an ambiguous label (e.g., "Needs specific software or too large") or left the item unscored (`data_open`/`code_open` were only asked for papers Cooper and colleagues had already coded as archiving their data/code, and not every such paper has a recorded answer, so the denominators below are smaller than the archiving counts reported earlier). As with the comparison above, this is a comparison against the human coding by Cooper and colleagues, not against a known correct answer, so a disagreement means only that the tool and the human coders reached different judgements. For data sharing (`r accuracy_summary$oddpub_data$n` papers with a clear human judgement), OddPub agreed with the human coders on `r sprintf("%.0f%%", accuracy_summary$oddpub_data$accuracy * 100)` of the papers (`r accuracy_summary$oddpub_data$n_disagree` disagreements: `r accuracy_summary$oddpub_data$n_tool_open_cooper_not` where OddPub judged the data open but the coders did not, and `r accuracy_summary$oddpub_data$n_tool_not_cooper_open` the other way around). Metacheck's `open_practices` module agreed with the human coders on `r sprintf("%.0f%%", accuracy_summary$metacheck_data$accuracy * 100)` of the papers (`r accuracy_summary$metacheck_data$n_disagree` disagreements: `r accuracy_summary$metacheck_data$n_tool_open_cooper_not` where `open_practices` judged the data open but the coders did not, and `r accuracy_summary$metacheck_data$n_tool_not_cooper_open` the other way around). For code sharing (`r accuracy_summary$oddpub_code$n` papers with a clear human judgement), the gap was larger: OddPub agreed `r sprintf("%.0f%%", accuracy_summary$oddpub_code$accuracy * 100)` of the time (`r accuracy_summary$oddpub_code$n_disagree` disagreements: `r accuracy_summary$oddpub_code$n_tool_open_cooper_not` and `r accuracy_summary$oddpub_code$n_tool_not_cooper_open`), whereas `open_practices` agreed `r sprintf("%.0f%%", accuracy_summary$metacheck_code$accuracy * 100)` of the time (`r accuracy_summary$metacheck_code$n_disagree` disagreements: `r accuracy_summary$metacheck_code$n_tool_open_cooper_not` and `r accuracy_summary$metacheck_code$n_tool_not_cooper_open`). The disagreements fall almost entirely on one side: both tools much more often judge a paper to share open data or code than the human coders judge it not to, and this corpus contains very few papers the human coders judged as clearly *not* sharing (`r accuracy_summary$oddpub_data$n_negative` for data, `r accuracy_summary$oddpub_code$n_negative` for code), so the counts of papers the tools agreed were not open rest on very small numbers. `open_practices` and OddPub both determine open data/code from the text of the article alone, but do not examine whether data and code are shared by examining the contents of data repositories, as other Metacheck modules do.
+OddPub [@riedel_oddpub_2020] is a tool that searches text for keywords related to data and code sharing. The Metacheck Open Practices module does the same, but is intentionally over-inclusive, which means it is designed to find more data or code sharing statements, while also returning more false positives. We compared the automatic text-based judgements from OddPub and the Open Practices module to Cooper and colleagues' human coding of whether data and code were openly shared (their `data_open`/`code_open` columns), treating "Yes" (and for data "Yes, but not all files") as open and "No" as not open, and excluding papers where the coders used an ambiguous label (e.g., "Needs specific software or too large") or left the item unscored (`data_open`/`code_open` were only asked for papers Cooper and colleagues had already coded as archiving their data/code, and not every such paper has a recorded answer, so the denominators below are smaller than the archiving counts reported earlier). As with the comparison above, this is a comparison against the human coding by Cooper and colleagues, not against a known correct answer, so a disagreement means only that the tool and the human coders reached different judgements. 
 
-Note that OddPub and `open_practices` classify every paper regardless of how Cooper and colleagues' coders scored this question. For data sharing, `r n_blank_data_open` papers archived their data (`data_availability == "Yes"`) but were left unscored on whether it could be opened, of which OddPub judged `r n_oddpub_open_blank_data` (`r sprintf("%.0f%%", n_oddpub_open_blank_data / n_blank_data_open * 100)`) and `open_practices` judged `r n_mc_open_blank_data` (`r sprintf("%.0f%%", n_mc_open_blank_data / n_blank_data_open * 100)`) to have open data; a further `r n_ambig_data_open` were explicitly flagged by Cooper and colleagues' coders as needing specific software or too large to open, of which OddPub judged `r n_oddpub_open_ambig_data` (`r sprintf("%.0f%%", n_oddpub_open_ambig_data / n_ambig_data_open * 100)`) and `open_practices` judged `r n_mc_open_ambig_data` (`r sprintf("%.0f%%", n_mc_open_ambig_data / n_ambig_data_open * 100)`) to have open data. For code sharing, `r n_blank_code_open` papers archived their code (`code_archived == "Yes"`) but were left unscored on whether it could be opened, of which OddPub judged `r n_oddpub_open_blank_code` (`r sprintf("%.0f%%", n_oddpub_open_blank_code / n_blank_code_open * 100)`) and `open_practices` judged `r n_mc_open_blank_code` (`r sprintf("%.0f%%", n_mc_open_blank_code / n_blank_code_open * 100)`) to have open code; a further `r n_ambig_code_open` were explicitly flagged as possibly accessible with the right software, of which OddPub judged `r n_oddpub_open_ambig_code` (`r sprintf("%.0f%%", n_oddpub_open_ambig_code / n_ambig_code_open * 100)`) and `open_practices` judged `r n_mc_open_ambig_code` (`r sprintf("%.0f%%", n_mc_open_ambig_code / n_ambig_code_open * 100)`) to have open code.
+For data sharing (`r opdata$n` papers with a clear human judgement), OddPub agreed with the human coders on `r pct1(opdata$accuracy)` of the papers (`r opdata$n_disagree` disagreements: `r opdata$n_tool_open_cooper_not` where OddPub judged the data open but the coders did not, and `r opdata$n_tool_not_cooper_open` the other way around). Metacheck's `open_practices` module agreed with the human coders on `r pct1(mcdata$accuracy)` of the papers (`r mcdata$n_disagree` disagreements: `r mcdata$n_tool_open_cooper_not` where `open_practices` judged the data open but the coders did not, and `r mcdata$n_tool_not_cooper_open` the other way around). For code sharing (`r opcode$n` papers with a clear human judgement), the gap was larger: OddPub agreed `r pct1(opcode$accuracy)` of the time (`r opcode$n_disagree` disagreements: `r opcode$n_tool_open_cooper_not` and `r opcode$n_tool_not_cooper_open`), whereas `open_practices` agreed `r pct1(mccode$accuracy)` of the time (`r mccode$n_disagree` disagreements: `r mccode$n_tool_open_cooper_not` and `r mccode$n_tool_not_cooper_open`). The disagreements fall almost entirely on one side: both tools much more often judge a paper to share open data or code than the human coders judge it not to, and this corpus contains very few papers the human coders judged as clearly *not* sharing (`r opdata$n_negative` for data, `r opcode$n_negative` for code), so the counts of papers the tools agreed were not open rest on very small numbers. `open_practices` and OddPub both determine open data/code from the text of the article alone, but do not examine whether data and code are shared by examining the contents of data repositories, as other Metacheck modules do.
+
+Note that OddPub and `open_practices` classify every paper regardless of how Cooper and colleagues' coders scored this question. For data sharing, `r n_blank_data_open` papers archived their data (`data_availability == "Yes"`) but were left unscored on whether it could be opened, of which OddPub judged `r npcnt(n_oddpub_open_blank_data, n_blank_data_open)` and `open_practices` judged `r npcnt(n_mc_open_blank_data, n_blank_data_open)`) to have open data; a further `r n_ambig_data_open` were explicitly flagged by Cooper and colleagues' coders as needing specific software or too large to open, of which OddPub judged `r npcnt(n_oddpub_open_ambig_data, n_ambig_data_open)` and `open_practices` judged `r npcnt(n_mc_open_ambig_data, n_ambig_data_open)` to have open data. For code sharing, `r n_blank_code_open` papers archived their code (`code_archived == "Yes"`) but were left unscored on whether it could be opened, of which OddPub judged `r npcnt(n_oddpub_open_blank_code, n_blank_code_open)` and `open_practices` judged `r npcnt(n_mc_open_blank_code, n_blank_code_open)` to have open code; a further `r n_ambig_code_open` were explicitly flagged as possibly accessible with the right software, of which OddPub judged `r npcnt(n_oddpub_open_ambig_code, n_ambig_code_open)` and `open_practices` judged `r npcnt(n_mc_open_ambig_code, n_ambig_code_open)` to have open code.
 
 ### Repo check, Data check, and Code check
 
@@ -636,134 +184,20 @@ For Metacheck, data and code is findable and accessible if it is archived in one
 ```{r}
 #| label: full-317-audit-load
 
-# The unified, single audit file covering ALL n_cooper_yes_mc_no
-# "Cooper found data/code, Metacheck missed it" papers -- superseding
-# the three separate, partially-overlapping audits (the
-# repo_not_detected_categorization_data.csv population, the first
-# agent-reviewed manual_repo_findability_audit_data.csv pass, and the later
-# classification-gap extension of it) an earlier version of this section
-# reported one at a time. Built across two rounds: (1) every paper
-# where repo_check found no repository at all was independently reviewed
-# by one AI agent (Claude, Anthropic) per paper, each instructed to read
-# the paper's full extracted text, locate the citation independently of
-# both Cooper's recorded excerpt and Metacheck's own detector output,
-# query the live repository page or API directly, and check Metacheck's
-# source code directly for a backend; (2) every paper where repo_check
-# DID find a repository but neither data_check nor code_check classified
-# any of its files as data or code was reviewed the same way, but with
-# the file listing already in hand, so the agent's task was to determine
-# whether the unclassified files are genuinely data or code, and if so,
-# why Metacheck's classifier missed them. A handful of round-(1) papers
-# were instead checked directly by the manuscript's author, as a manual
-# pilot before the agent-based pass began. No human review of each
-# individual agent's live-fetch result or classification was performed
-# afterward.
-full_audit <- read.csv("data/review/manual_repo_findability_audit_data.csv", stringsAsFactors = FALSE)
-full_fair_audit <- read.csv("data/review/manual_fair_api_findability_audit_data.csv", stringsAsFactors = FALSE)
-stopifnot(nrow(full_audit) == n_cooper_yes_mc_no)
-stopifnot(identical(full_audit$paper_doi, full_fair_audit$paper_doi))
+source("code/full_audit.R")
+```
 
-full_audit$fair_machine_findable_in_principle <- full_fair_audit$fair_machine_findable_in_principle
+We used Claude Opus 5.5 to assist in reviewing the `r n_cooper_yes_mc_no` papers where Cooper and colleagues' coders coded data or code as shared and where Metacheck failed to find data or code. This review was done one paper at a time by checking the contents of the repository and revealed five reasons Metacheck misses data and code in a repository (see @tbl-audit-reasons). In `r n_no_repo_cited` papers we found no reference to a repository or link to a dataset in the manuscript. The data were either explicitly withheld for confidentiality, ethical, or Indigenous-data-sovereignty reasons, could not be shared for legal reasons, or were in shared in the paper or its supplemental material. Some of these papers offer to make data available upon request, but are arguably better classified as papers that explain why data could not be shared. In `r n_nonfair` papers the citation or the repository did not meet basic FAIR requirements, so the data could not be retrieved automatically when we checked. Papers cite a private reviewer or share link instead of the dataset's public identifier (`r n_nonfair_private_link` papers), or an organisation or user page that identifies no specific deposit (`r n_nonfair_no_deposit`); or the repository blocks automated access (`r n_nonfair_blocked`), was not live or accessible when checked (`r n_not_live`), or offers no API through which a machine can retrieve the data (`r n_unsupported_not_fair + n_nonfair_no_api`). Automated access to repositories has become harder in recent years because of heavy scraping of files, which repository managers assume is mostly done by bots collecting training data for generative AI. In a 2025 survey of 66 repositories, over 90% reported aggressive bot traffic, often causing slowdowns or outages, and many responded with rate limits and other blocks that also stop legitimate machine access [@shearer2025aibots]. We observed this directly when attempting to download files for this manuscript.
 
-# Five clusters, all mutually exclusive and summing to n_cooper_yes_mc_no.
-# (An earlier "repository contains no genuine data or code" cluster is now
-# empty: on opening each of its files, every one held data or code, and
-# those rows moved to the not-classified cluster below.)
-# CORRECTLY_DETECTABLE_NO_GAP_FOUND no longer appears: every row this
-# manuscript's own review had assigned to it was independently re-verified
-# against the live pipeline (res_repo_check.RData, and for most, a fresh
-# uncached repo_check() rerun) and found to be either a real, misclassified
-# Metacheck-side gap, or a paper that genuinely resolved once the pipeline
-# itself was refreshed -- in which case it was removed from this population
-# entirely rather than retained under a "no gap" label, the same treatment
-# given to every other genuinely-resolved paper in this review.
-no_repo_cited_cat <- "NO_REPOSITORY_CITED"
-# The repository was found and holds data or code, but Metacheck classified
-# none of its files as such: either the format is one Metacheck does not yet
-# support (unsupported_format_cats), or the data or code were not shared in a
-# FAIR form that identifies them as data or code (a table inside a PDF or
-# Word document, a bare .txt file, code saved without its language's
-# extension).
-unsupported_format_cats <- c("CLASSIFIER_EXTENSION_GAP", "CLASSIFIER_MISTYPED")
-not_fair_format_cat <- "DATA_OR_CODE_NOT_IN_FAIR_FORMAT"
-not_classified_cats <- c(unsupported_format_cats, not_fair_format_cat)
-# Technical limitations: the repository is FAIR and on a platform Metacheck
-# supports, but something stops Metacheck from using it. Two kinds:
-#   - text extraction: the PDF-to-text step corrupted or dropped the
-#     identifier before Metacheck sees the text;
-#   - Metacheck's own code: a defect or a deliberate design limit.
-extraction_cats <- c("EXTRACTION_GAP_DOI_GARBLED", "EXTRACTION_GAP_TEXT_MISSING")
-metacheck_code_cats <- c("SUPPORTED_PLATFORM_BUG",
-                         "CLASSIFIER_ARCHIVE_NOT_EXPANDED", "FILES_NOT_ENUMERATED")
-metacheck_limitation_cats <- c(extraction_cats, metacheck_code_cats)
-# Not FAIR, besides an unsupported platform without an API and a repository
-# that is not live (both counted below): the citation is a private reviewer
-# or share link, or a bare organisation/user page that identifies no specific
-# deposit; the repository blocks automated access; or it offers no API
-# through which the data can be retrieved (classified 2026-10-13, FAIR-first).
-not_fair_cats <- c("NOT_FAIR_PRIVATE_LINK", "PLATFORM_URL_NOT_A_SINGLE_REPO",
-                   "NOT_FAIR_BLOCKS_AUTOMATED_ACCESS", "NOT_FAIR_NO_DATA_API")
+In `r n_unsupported_but_fair` papers, data is shared on a repository that is FAIR, but Metacheck does not yet support automated downloads from this repository. Metacheck does not yet have support for some field-specific or institutional repositories (for example, the US Geological Survey's ScienceBase, the Environmental Data Initiative, the NERC Environmental Information Data Centre, and PANGAEA, the earth- and environmental-science data publisher). We found `r n_not_classified` papers that shared data or code in a repository Metacheck supports, but in a format Metacheck is not able to automatically classify as data or code. This occurred when data was shared in non-FAIR formats (e.g., a table in a PDF file), or data or code files in a plain .txt file without labeling the file as data or code (which makes it difficult to automatically differentiate them from output or documentation files in a repository, while a human can find such data). Another reason was that the file extension is not in the list of files that metacheck classifies as data. For example, drone photographs that are the measurement data in JPG files are classified as image material rather than data by Metacheck. Finally, archives in `.rar` or `.7z` formats can't be opened by R, and Metacheck can not (yet) examine their contents.
 
-n_no_repo_cited <- sum(full_audit$root_cause_category == no_repo_cited_cat)
-n_not_classified <- sum(full_audit$root_cause_category %in% not_classified_cats)
-n_unsupported_format <- sum(full_audit$root_cause_category %in% unsupported_format_cats)
-n_not_fair_format <- sum(full_audit$root_cause_category == not_fair_format_cat)
-n_metacheck_limitation <- sum(full_audit$root_cause_category %in% metacheck_limitation_cats)
+For the remaining `r n_metacheck_limitation` papers, the repository is FAIR and on a platform Metacheck supports, but a technical limitation prevented Metacheck from finding or using it. In `r n_lim_extraction` papers, the PDF to text conversion corrupted the repository identifier, most often by inserting spaces into a DOI (`r n_lim_doi_garbled` papers), or the text produced by GROBID lacked the data availability statement, usually because this section followed the reference list (`r n_lim_text_missing`). 
 
-is_platform_not_supported <- full_audit$root_cause_category == "PLATFORM_NOT_SUPPORTED"
-is_not_live <- full_audit$root_cause_category == "REPO_NOT_ACTUALLY_LIVE_OR_ACCESSIBLE"
-n_unsupported_but_fair <- sum(is_platform_not_supported & full_audit$fair_machine_findable_in_principle == "TRUE")
-n_unsupported_not_fair <- sum(is_platform_not_supported & full_audit$fair_machine_findable_in_principle == "FALSE")
-n_not_live <- sum(is_not_live)
-n_nf <- function(cat) sum(full_audit$root_cause_category == cat)
-n_nonfair_private_link <- n_nf("NOT_FAIR_PRIVATE_LINK")
-n_nonfair_no_deposit <- n_nf("PLATFORM_URL_NOT_A_SINGLE_REPO")
-n_nonfair_blocked <- n_nf("NOT_FAIR_BLOCKS_AUTOMATED_ACCESS")
-n_nonfair_no_api <- n_nf("NOT_FAIR_NO_DATA_API")
-n_nonfair <- n_unsupported_not_fair + n_not_live + sum(full_audit$root_cause_category %in% not_fair_cats)
+The remaining `r n_lim_code` papers reflect limitations of Metacheck's own code. In `r n_lim_ref_only` of these papers, the DOI of the repository appeared only in the reference list, which Metacheck does not search. In `r n_lim_ref_citation` papers the authors referred to their data only through a data citation; in the other `r n_lim_ref_conversion` the authors did give the DOI in the data availability statement, but the conversion from PDF to text moved it into the reference list or scrambled the statement. Data citations allow assigning credit to the reuse of data, and are therefore good practice, but it is difficult for a machine to identify which DOIs in a reference list point to the data underlying the manuscript. We therefore strongly recommend to always also provide a direct link to the DOI of the repository holding the authors' own data in the main text, for example in a data availability statement. In the remaining `r n_lim_code - n_lim_ref_only` papers Metacheck did not follow a Handle link to a repository it supports (4 papers), did not recognise the identifier (a Figshare collection or institutional DOI, 3 papers; an Arctic Data Center identifier that is not a DOI, 1 paper), or did not read files inside an archive (2 papers). The full per-paper record for every one of these `r n_cooper_yes_mc_no` papers is available in `data/review/manual_repo_findability_audit_data.csv` and `data/review/manual_fair_api_findability_audit_data.csv`.
 
-stopifnot(n_no_repo_cited + n_not_classified + n_metacheck_limitation +
-  n_unsupported_but_fair + n_nonfair == n_cooper_yes_mc_no)
-
-# Misses explained by data and code not shared following the FAIR
-# principles: no repository linked, data or code in a non-FAIR format, or
-# a non-FAIR link or repository. Every other paper Cooper's coders found
-# to share data or code shared it in a FAIR way, and Metacheck's own
-# finds (n_both_yes_either) are a subset of those.
-n_not_fair_total <- n_no_repo_cited + n_not_fair_format + n_nonfair
-n_cooper_fair <- n_cooper_either - n_not_fair_total
-stopifnot(n_both_yes_either + n_cooper_yes_mc_no == n_cooper_either)
-pct_fair_found <- sprintf("%.1f%%", 100 * n_both_yes_either / n_cooper_fair)
-
-# The former STALE_CACHE_FALSE_NEGATIVE papers were rerun one at a time
-# against metacheck 109a9aa on 2026-10-13: those that now have files left
-# the audit, and the cause of every other one is a specific code or
-# extraction limitation, so that category no longer exists.
-stopifnot(!"STALE_CACHE_FALSE_NEGATIVE" %in% full_audit$root_cause_category)
-
-# Breakdown within the Metacheck-limitation cluster, for the detailed
-# subsection below.
-n_lim_archive_not_expanded <- sum(full_audit$root_cause_category == "CLASSIFIER_ARCHIVE_NOT_EXPANDED")
-n_lim_files_not_enumerated <- sum(full_audit$root_cause_category == "FILES_NOT_ENUMERATED")
-n_lim_platform_bug <- sum(full_audit$root_cause_category == "SUPPORTED_PLATFORM_BUG")
-n_lim_doi_garbled <- sum(full_audit$root_cause_category == "EXTRACTION_GAP_DOI_GARBLED")
-n_lim_text_missing <- sum(full_audit$root_cause_category == "EXTRACTION_GAP_TEXT_MISSING")
-n_lim_extraction <- n_lim_doi_garbled + n_lim_text_missing
-n_lim_code <- sum(full_audit$root_cause_category %in% metacheck_code_cats)
-# Within the code limitations: the repository DOI appears only in the
-# reference list of the extracted text, which Metacheck does not search,
-# either because the authors cited their data only through a reference
-# ("data citation") or because the PDF-to-text step moved the DOI out of
-# the data statement or scrambled it ("text conversion").
-n_lim_ref_only <- sum(!is.na(full_audit$doi_only_in_reference_list))
-n_lim_ref_citation <- sum(full_audit$doi_only_in_reference_list %in% "data citation")
-n_lim_ref_conversion <- sum(full_audit$doi_only_in_reference_list %in% "text conversion")
-stopifnot(n_lim_ref_citation + n_lim_ref_conversion == n_lim_ref_only,
-          all(full_audit$root_cause_category[!is.na(full_audit$doi_only_in_reference_list)] %in% metacheck_code_cats))
-# The FAIR repositories on an unsupported platform reclassified on
-# 2026-10-13 include the Environmental Data Initiative (EDI) papers.
-n_unsupported_edi <- sum(is_platform_not_supported & grepl("EDI is a DataONE member node",
-  full_audit$manual_why_metacheck_misses_it, fixed = TRUE))
+```{r}
+#| label: tbl-audit-reasons
+#| tbl-cap: "Reasons and frequencies of papers where manual coders found data or code while Metacheck did not."
 
 full_audit_summary_table <- data.frame(
   Cluster = c(
@@ -776,17 +210,7 @@ full_audit_summary_table <- data.frame(
   `n papers` = c(n_no_repo_cited, n_not_classified, n_nonfair, n_unsupported_but_fair, n_metacheck_limitation),
   check.names = FALSE
 )
-```
 
-We had Claude Opus 5.5 review the `r n_cooper_yes_mc_no` papers where Cooper and colleagues' coders coded data or code as shared and where Metacheck failed to find data or code, one paper at a time, by checking the contents of the repository. This analysis revealed five reasons why Metacheck misses data and code in a repository (see @tbl-audit-reasons). In `r n_no_repo_cited` papers we found no reference to a repository or link to a dataset in the manuscript. The data were either explicitly withheld for confidentiality, ethical, or Indigenous-data-sovereignty reasons, could not be shared for legal reasons, or were in shared in the paper or its supplemental material. Some of these papers offer to make data available upon request, but are arguably better classified as papers that explain why data could not be shared. In `r n_nonfair` papers the citation or the repository did not meet basic FAIR requirements, so the data could not be retrieved automatically when we checked. Papers cite a private reviewer or share link instead of the dataset's public identifier (`r n_nonfair_private_link` papers), or an organisation or user page that identifies no specific deposit (`r n_nonfair_no_deposit`); or the repository blocks automated access (`r n_nonfair_blocked`), was not live or accessible when checked (`r n_not_live`), or offers no API through which a machine can retrieve the data (`r n_unsupported_not_fair + n_nonfair_no_api`). Automated access to repositories has become harder in recent years because of heavy scraping of files, which repository managers assume is mostly done by bots collecting training data for generative AI. In a 2025 survey of 66 repositories, over 90% reported aggressive bot traffic, often causing slowdowns or outages, and many responded with rate limits and other blocks that also stop legitimate machine access [@shearer2025aibots]. We observed this directly when attempting to download files for this manuscript.
-
-In `r n_unsupported_but_fair` papers data is shared on a repository that is FAIR, but Metacheck does not yet support automated downloads from this repository. Metacheck does not yet have support for some field-specific or institutional repositories (for example, the US Geological Survey's ScienceBase, the Environmental Data Initiative, the NERC Environmental Information Data Centre, and PANGAEA, the earth- and environmental-science data publisher). We found `r n_not_classified` papers that shared data or code in a repository Metacheck supports, but in a format Metacheck is not able to automatically classify as data or code. This occurred when data was shared in non-FAIR formats (e.g., a table in a PDF file), or data or code files in a plain .txt file without labeling the file as data or code (which makes it difficult to automatically differentiate from output or documentation files in a repository, while a human can find such data). Another reason was that the file extension is not in the list of files that metacheck classifies as data. For example, drone photographs that are the measurement data in JPG files are classified as image material rather than data by Metacheck. Finally, archives in `.rar` or `.7z` formats can't be opened by R, and Metacheck can not (yet) examine their contents.
-
-For the remaining `r n_metacheck_limitation` papers the repository is FAIR and on a platform Metacheck supports, but a technical limitation prevented Metacheck from finding or using it. In `r n_lim_extraction` papers the PDF to text conversion corrupted the repository identifier, most often by inserting spaces into a DOI (`r n_lim_doi_garbled` papers), or the text produced by GROBID lacked the data availability statement, usually because this section followed the reference list (`r n_lim_text_missing`). The remaining `r n_lim_code` papers reflect limitations of Metacheck's own code. In `r n_lim_ref_only` of these papers the DOI of the repository appeared only in the reference list, which Metacheck does not search. In `r n_lim_ref_citation` papers the authors referred to their data only through a data citation; in the other `r n_lim_ref_conversion` the authors did give the DOI in the data availability statement, but the conversion from PDF to text moved it into the reference list or scrambled the statement. Data citations allow assigning credit to the reuse of data, and are therefore good practice, but it is difficult for a machine to identify which DOIs in a reference list point to the data underlying the manuscript. We therefore strongly recommend to always also provide a direct link to the DOI of the repository holding the authors' own data in the main text, for example in a data availability statement. In the remaining `r n_lim_code - n_lim_ref_only` papers Metacheck did not follow a Handle link to a repository it supports (4 papers), did not recognise the identifier (a Figshare collection or institutional DOI, 3 papers; an Arctic Data Center identifier that is not a DOI, 1 paper), or did not read files inside an archive (2 papers). The full per-paper record for every one of these `r n_cooper_yes_mc_no` papers is available in `data/review/manual_repo_findability_audit_data.csv` and `manual_fair_api_findability_audit_data.csv`.
-
-```{r}
-#| label: tbl-audit-reasons
-#| tbl-cap: "Reasons and frequencies of papers where manual coders found data or code while Metacheck did not."
 # Tables are plain Markdown tables (knitr::kable), which Quarto writes as real Typst
 # tables and apaquarto formats in APA style; flextable has no Typst output.
 knitr::kable(full_audit_summary_table, format = "pipe", align = c("l", "r"))
@@ -796,18 +220,24 @@ In total, `r n_no_repo_cited` papers did not link to a repository, `r n_not_fair
 
 ## 2. Where were the data/code archived?
 
-Cooper and colleagues coded the specific repository where data and/or code was stored. They note that 60% of the code files hosted on GitHub or similar platforms were also archived on Zenodo [@cooper2026, p. 1959]. GitHub is not a stable repository, while Zenodo is. Cooper et al. report Dryad as the dominant data repository in the papers they examined (57%, n = 1022), with Figshare (9%), Zenodo (12%), and "various institutional and government repositories" (17%) making up most of the remainder [@cooper2026, p. 1959].
+Cooper and colleagues coded the specific repository where data and/or code was stored. They note that 60% of the code files hosted on GitHub or similar platforms were also archived on Zenodo [@cooper2026, p. 1959]. GitHub is not a stable repository, as owners can change or delete files, while Zenodo is. Cooper et al. report Dryad as the dominant data repository in the papers they examined (57%, n = 1022), with Figshare (9%), Zenodo (12%), and "various institutional and government repositories" (17%) making up most of the remainder [@cooper2026, p. 1959].
 
-Cooper et al. separately coded the repository that stored the data, and the repository that stored the code, and both data and code can be stored in more than one platform per paper. Metacheck does not distinguish between data and code repositories, but lists whether files in all repositories it finds contain data and/or code files. We retrieved the repository address from Metacheck, and assigned each repository to the categories used by Cooper and colleagues (the categories "Supplementary materials" and "Personal website" are not used by Metacheck, as it can only find FAIR repositories). We then classify agreement into five categories: both name the same platforms, Metacheck names fewer platforms, Metacheck names more platforms, each names a platform the other does not, or they share no platform.
+<!--
+Double-checking, does metacheck list presence of data/code files for *each* repo in a paper separately, or for the aggregate of all repos? As previously written, below sounded like the latter, but I think is the former, so I revised it.
+-->
+
+Cooper and colleagues separately coded the repository that stored the data and the repository that stored the code, and both data and code can be stored in more than one platform per paper. Metacheck does not distinguish between data and code repositories, but lists whether each repository it finds contain data and/or code files. We retrieved the repository address from Metacheck and assigned each repository to the categories used by Cooper and colleagues (the categories "Supplementary materials" and "Personal website" are not used by Metacheck, as it is designed to only find FAIR repositories). We then classify agreement into five categories: both name the same platforms, Metacheck names fewer platforms, Metacheck names more platforms, each names a platform the other does not, or they share no platform.
 
 ```{r}
 #| label: tbl-archive-platform
-#| tbl-colwidths: [9, 12, 15, 15, 15, 20, 14]
 #| tbl-cap: "Agreement between Cooper et al.'s coded archive platform(s) and the platform(s) of the repositories in which Metacheck found data or code, compared as sets of platforms."
+# tbl-colwidths: [9, 12, 15, 15, 15, 20, 14]
 
 platform_table <- do.call(rbind, lapply(c("data_archive", "code_archive"), function(k) {
-  r <- results[[k]]; ct <- r$categories; n <- r$n_both_coded
-  f <- function(x) sprintf("%d (%.1f%%)", x, 100 * x / n)
+  r <- results[[k]]
+  ct <- r$categories
+  n <- r$n_both_coded
+  f <- function(x) sprintf("%d (%.2g%%)", x, 100 * x / n)
   data.frame(
     Platform = if (k == "data_archive") "Data" else "Code",
     `Comparable papers` = n,
@@ -817,21 +247,25 @@ platform_table <- do.call(rbind, lapply(c("data_archive", "code_archive"), funct
     `Each lists one the other lacks` = f(ct[["partial"]]),
     `No shared platform` = f(ct[["none"]]),
     check.names = FALSE)
-}))
-knitr::kable(platform_table, format = "pipe", align = c("l", rep("r", 6)))
+})) |>
+  pivot_longer(cols = 3:7, names_to = "Comparison") |>
+  mutate(name = sprintf("%s (n = %s)", Platform, `Comparable papers`)) |> 
+  select(-Platform, -`Comparable papers`) |>
+  pivot_wider()
+knitr::kable(platform_table, format = "pipe", align = c("l", rep("r", 2)))
 ```
 
-For data, `r results$data_archive$n_both_coded` papers could be compared because human coders and Metacheck named at least one repository platform. The two sides named exactly the same platform(s) for `r results$data_archive$n_agree` (`r pct1(results$data_archive$pct_agree/100)`%) and agreed on at least one shared platform for `r results$data_archive$n_any_overlap` (`r pct1(results$data_archive$pct_any_overlap/100)`%). Some of the differences are caused by the previously discussed limitations in the repositories that Metacheck supports, but other times Metacheck found more repositories than human coders. In `r results$data_archive$categories[["mc_fewer"]]` papers Metacheck lists fewer platforms than the coders, most often missing a second repository coded as "Other repo/database" (e.g., an institutional or domain-specific database). In `r results$data_archive$categories[["mc_more"]]` papers Metacheck found an additional platform holding data-classified files that the human coders missed, most often GitHub (`r n_data_mc_more_github` papers). Usually this is the authors' own repository holding data files alongside the analysis code, but in `r tp$n_data_archive_mc_more_to_exact` papers it is a repository of software the authors used, written by someone else.
+For data, `r results$data_archive$n_both_coded` papers could be compared because human coders and Metacheck named at least one repository platform. The two sides named exactly the same platform(s) for `r results$data_archive$n_agree` (`r pct1(results$data_archive$pct_agree/100)`) and agreed on at least one shared platform for `r results$data_archive$n_any_overlap` (`r pct1(results$data_archive$pct_any_overlap/100)`). Some of the differences are caused by the previously discussed limitations in the repositories that Metacheck supports, but other times Metacheck found more repositories than human coders. In `r results$data_archive$categories[["mc_fewer"]]` papers Metacheck lists fewer platforms than the coders, most often missing a second repository coded as "Other repo/database" (e.g., an institutional or domain-specific database). In `r results$data_archive$categories[["mc_more"]]` papers Metacheck found an additional platform holding data-classified files that the human coders missed, most often GitHub (`r n_data_mc_more_github` papers). Usually this is the authors' own repository holding data files alongside the analysis code, but in `r tp$n_data_archive_mc_more_to_exact` papers it is a repository of software the authors used, written by someone else.
 
 Metacheck cannot yet differentiate between data or code that authors created and shared, and data or code that they reused, and it treats all files in repositories linked to in a manuscript as the paper's own data or code. Cooper and colleagues asked coders to count data the paper generated or collated, but did not record whether archived files were created by the authors. We asked Claude to examine each of the `r tp$n_github_repos` links to GitHub and GitLab that Metacheck found, and it judged that `r tp$n_third_party_repos` of these links, in `r tp$n_third_party_papers` papers, point to a repository whose owner is not an author of the manuscript or their research group. With one exception these hold software or scripts the authors used, not reused data; the exception is the repository of a text corpus, linked to by `r tp$n_corpus_papers` papers. Authors can make re-use of data or code created by others more transparent and automatically detectable by only using data citations for such repositories. There should not be a direct link to a repository that is re-used in the main text.
 
 ## 3. Can the archived data/code be located, downloaded and opened?
 
-Cooper et al. report that, of the 1735 papers in their dataset that used data, 1690 archived the data, of which 97% could be accessed via the links provided in the data availability statement, 95% could be downloaded, and 91% could be opened [@cooper2026, p. 1959]. Cooper et al.'s coders downloaded data for `r n_dl_cooper_yes` papers; for `r n_dl_mc_na` of these papers Metacheck downloaded no data file at all, mostly because it did not find the repository (because the data were not shared in a FAIR way, were in a FAIR repository Metacheck does not support, or because of the technical limitations discussed earlier). Counted over all `r n_dl_cooper_yes`, Metacheck downloaded and could use the data in `r n_dl_mc_true` papers (`r pct1(n_dl_mc_true / n_dl_cooper_yes)`%). For the `r results$data_download$n_both_coded` papers where both Metacheck and the manual coders gave an answer, they agreed for `r results$data_download$n_agree` (`r pct1(results$data_download$pct_agree/100)`%), and in `r results$data_download$n_disagree` papers there was a disagreement.
+Cooper et al. report that, of the 1735 papers in their dataset that used data, 1690 archived the data, of which 97% could be accessed via the links provided in the data availability statement, 95% could be downloaded, and 91% could be opened [@cooper2026, p. 1959]. Cooper et al.'s coders downloaded data for `r n_dl_cooper_yes` papers; for `r n_dl_mc_na` of these papers Metacheck downloaded no data file at all, mostly because it did not find the repository (because the data were not shared in a FAIR way, were in a FAIR repository Metacheck does not support, or because of the technical limitations discussed earlier). Counted over all `r n_dl_cooper_yes`, Metacheck downloaded and could use the data in `r n_dl_mc_true` papers (`r pct1(n_dl_mc_true / n_dl_cooper_yes)`). For the `r results$data_download$n_both_coded` papers where both Metacheck and the manual coders gave an answer, they agreed for `r results$data_download$n_agree` (`r pct1(results$data_download$pct_agree/100)`), and in `r results$data_download$n_disagree` papers there was a disagreement.
 
 We resolved each of the `r results$data_download$n_disagree` disagreements by downloading and opening the files. For `r vt(verdict_tallies$data_download, "COOPER_RIGHT")` the manual coders were correct. In `r n_dl_right("(?i)separated by spaces|space-separated")` the data are space-separated tables, which Metacheck cannot read, and `r n_dl_right("max_file_size")` of these also exceeds its 100 MB download limit. In `r n_dl_right("GeoTIFF")` the data are GeoTIFF and shapefile files inside a zip archive. In `r n_dl_right("Sequence Read Archive|NCBI SRA")` the data are in NCBI's Sequence Read Archive, a FAIR repository Metacheck does not support. In `r vt(verdict_tallies$data_download, "METACHECK_RIGHT")` the review judged Metacheck's answer correct, but this needs care, because Metacheck's answer combines two conditions: the files can be downloaded, and they contain a usable data table. In three papers the data were Excel files with formatted publication tables rather than raw data, and in a fourth the files are model-input files for Stan rather than raw data. In these four papers the files download, as the coders recorded, but they are not usable data tables, which is what Metacheck's answer requires. In the other two the coders' answer was wrong. One is an OSF project that the manual coder reported needing to request access to, although OSF's activity log shows it has been public since January 2021. The other linked to an Excel file for which the manual coder reported a download error, but that Metacheck downloaded without problem.
 
-With respect to code sharing, Cooper et al. report that "only 35% (n = 577) archived their code" among papers using code [@cooper2026, p. 1958], and, among archived code, that most is on Zenodo or GitHub-family platforms [@cooper2026, p. 1959]. Cooper et al.'s coders and Metacheck both gave an answer on whether code was archived for `r results$code_archived$n_both_coded` papers. They agreed on `r results$code_archived$n_agree` (`r pct1(results$code_archived$pct_agree/100)`%) and disagreed on `r results$code_archived$n_disagree` (`r pct1(1-results$code_archived$pct_agree/100)`%). Concerning the question whether shared code could be downloaded, for `r results$code_download$n_both_coded` papers (which is the subset of papers where code was archived) there was almost perfect agreement between manual and automatic classifications (`r results$code_download$n_agree` of `r results$code_download$n_both_coded` (`r pct1(results$code_download$pct_agree/100)`%), with only `r results$code_download$n_disagree` disagreement remaining).
+With respect to code sharing, Cooper et al. report that "only 35% (n = 577) archived their code" among papers using code [@cooper2026, p. 1958], and, among archived code, that most is on Zenodo or GitHub-family platforms [@cooper2026, p. 1959]. Cooper et al.'s coders and Metacheck both gave an answer on whether code was archived for `r results$code_archived$n_both_coded` papers. They agreed on `r results$code_archived$n_agree` (`r pct1(results$code_archived$pct_agree/100)`) and disagreed on `r results$code_archived$n_disagree` (`r pct1(1-results$code_archived$pct_agree/100)`). Concerning the question whether shared code could be downloaded, for `r results$code_download$n_both_coded` papers (which is the subset of papers where code was archived) there was almost perfect agreement between manual and automatic classifications (`r results$code_download$n_agree` of `r results$code_download$n_both_coded` (`r pct1(results$code_download$pct_agree/100)`), with only `r results$code_download$n_disagree` disagreement remaining).
 
 We investigated all `r nrow(code_categories)` disagreements about whether whether code was archived (and the one disagreement about whether code could be downloaded). The manual coders were correct in `r vt(verdict_tallies$code_archived, "COOPER_RIGHT")` papers and Metacheck was correct in `r n_code("coders_wrong")` papers, and in `r vt(verdict_tallies$code_archived, "BOTH_WRONG")` papers both were wrong. In `r n_code("not_fair")` papers the code was not shared following FAIR principles. Metacheck could not find the code, but manual coders could. Out of these `r n_code("not_fair")` papers, in `r n_code_reason("only the Dryad page links")` authors shared data on Dryad and code on Zenodo, but the paper never directly linked to the Zenodo repository. Instead, the link to Zenodo was only present inside the Dryad repository. Authors should link to code directly in the data availability statement, using the Zenodo DOI. In `r n_code_reason("only in journal Supporting Information")` papers the code is provided only as journal Supporting Information, in `r n_code_reason("saved as .txt")` it is saved as a `.txt` file or without a file extension, in `r n_code_reason("link to a GitHub account")` the paper links to a generic GitHub account of an authors, instead of the specific GitHub repository that contains the shared files, and in `r n_code_reason("Word or PDF")` the code is inside a Word or PDF document. In the remaining `r n_code_reason("named only by the coders") + n_code_reason("no longer exists") + n_code_reason("private share link")` papers the paper gives no link to the code, a private share link, or a GitHub repository that no longer exists.
 
@@ -877,7 +311,7 @@ n_code_languages <- nrow(code_languages)
 n_code_language_r <- sum(code_languages$language %in% "R")
 ```
 
-Metacheck can only report the extensions of files it recognises as data or code, so these numbers are not directly comparable to those of Cooper et al. [-@cooper2026, p. 1960]. Files recognised as data were archived with `r n_data_ext_raw` different file extensions, and of the `r n_data_ext` unique data file extensions recorded per paper, `r pct1(n_data_ext_top10 / n_data_ext)`% (n = `r n_data_ext_top10`) were saved with the following 10 file extensions: `r data_ext_top10`. Of the `r n_code_ext` unique code file extensions recorded per paper, `r pct1(n_code_ext_native / n_code_ext)`% (n = `r n_code_ext_native`) were saved as native source code, and a further `r pct1(n_code_ext_notebook / n_code_ext)`% (n = `r n_code_ext_notebook`) as notebook files. Most code in FAIR formats that Metacheck could detect (`r pct1(n_code_language_r / n_code_languages)`%, n = `r n_code_language_r`) was written in R.
+Metacheck can only report the extensions of files it recognises as data or code, so these numbers are not directly comparable to those of Cooper et al. [-@cooper2026, p. 1960]. Files recognised as data were archived with `r n_data_ext_raw` different file extensions, and of the `r n_data_ext` unique data file extensions recorded per paper, `r pct1(n_data_ext_top10 / n_data_ext)` (n = `r n_data_ext_top10`) were saved with the following 10 file extensions: `r data_ext_top10`. Of the `r n_code_ext` unique code file extensions recorded per paper, `r pct1(n_code_ext_native / n_code_ext)` (n = `r n_code_ext_native`) were saved as native source code, and a further `r pct1(n_code_ext_notebook / n_code_ext)` (n = `r n_code_ext_notebook`) as notebook files. Most code in FAIR formats that Metacheck could detect (`r pct1(n_code_language_r / n_code_languages)`, n = `r n_code_language_r`) was written in R.
 
 ## 5. Do the archived data/code have a README (or equivalent)? If so, how useful is it?
 
@@ -902,118 +336,19 @@ n_readme_description_dryad <- sum(readme_cooper_yes & review$any_readme_verdict 
                                     grepl("dryad", review$any_readme_comment, ignore.case = TRUE))
 ```
 
-Cooper et al.'s coders were asked whether the data had a "README/metadata", and a README or equivalent was present for 66% (n = 1114) of papers that shared data, and 61% (n = 351) of the papers that shared code [@cooper2026, p. 1960]. In total, `r pct1(n_cooper_readme / n_cooper_either)`% of papers with either data or code included information equivalent to a README. Metacheck checks whether a repository contains a README file, which it determines from the file name (e.g., 'README' or 'data description' in various ways this can be written), or a RO-Crate metadata file. We do not report README quality, because how useful a README is requires a judgement only humans can make. Metacheck found a README file for `r pct1(n_mc_readme / n_mc_repo_found)`% (n = `r n_mc_readme`) of the `r n_mc_repo_found` papers with a repository that contains files, which is substantially lower than the manual coders found. The largest cause of disagreement is what counts as a README for Metacheck, compared with the manual coders. In `r vt(verdict_tallies$any_readme, "DIFFERENT_DEFINITION")` papers the coders recorded a README or equivalent, but the deposit holds no README file. For `r n_readme_description` of these the deposit's web page has a description or abstract, `r n_readme_description_dryad` of them on Dryad, and the coders may have counted this as the equivalent of a README (there are no details on what coders counted). We recommend that researchers add a README file to every repository (and preferably a RO-Crate file), as information on websites is typically not accessible through an API, and therefore not FAIR.
+Cooper et al.'s coders were asked whether the data had a "README/metadata", and a README or equivalent was present for 66% (n = 1114) of papers that shared data, and 61% (n = 351) of the papers that shared code [@cooper2026, p. 1960]. In total, `r pct1(n_cooper_readme / n_cooper_either)` of papers with either data or code included information equivalent to a README. Metacheck checks whether a repository contains a README file, which it determines from the file name (e.g., 'README' or 'data description' in various ways this can be written), or a RO-Crate metadata file. We do not report README quality, because how useful a README is requires a judgement only humans can make. Metacheck found a README file for `r npcnt(n_mc_readme, n_mc_repo_found)` of the `r n_mc_repo_found` papers with a repository that contains files, which is substantially lower than the manual coders found. The largest cause of disagreement is what counts as a README for Metacheck, compared with the manual coders. In `r vt(verdict_tallies$any_readme, "DIFFERENT_DEFINITION")` papers the coders recorded a README or equivalent, but the deposit holds no README file. For `r n_readme_description` of these the deposit's web page has a description or abstract, `r n_readme_description_dryad` of them on Dryad, and the coders may have counted this as the equivalent of a README (there are no details on what coders counted). We recommend that researchers add a README file to every repository (and preferably a RO-Crate file), as information on websites is typically not accessible through an API, and therefore not FAIR.
 
 ## 6. How complete is the archived data, and can the code be run?
 
 ```{r}
 #| label: reproducibility-counts
 
-# What reproducibility_check did with the code of each paper. We count only scripts that
-# the module tried to run as analyses of their own, and read the one-word reason the
-# module saved for each script that did not run through (the "reason" column), so these
-# numbers match the module's own grouping rather than re-deriving reasons from messages.
-targets::tar_load(res_reproducibility_check, store = "_targets")
-targets::tar_load(reproducibility_detail, store = "_targets")
-rc_st <- res_reproducibility_check$summary_table
-rc_all <- res_reproducibility_check$run_results
-rc_install <- res_reproducibility_check$install_results
-rc_changes <- res_reproducibility_check$modifications
-
-# Outcomes that are not a standalone analysis script, so they are not counted among the
-# scripts that were run (the module excludes the same set). Each is counted and named
-# separately below. A script run by another through source() or import, a file that only
-# defines functions, a JAGS/BUGS model file, a file that is not code in a language the
-# module runs, a file the module did not download, and a failure of Docker on our side.
-rc_excluded <- c("run_by_source", "run_by_import", "jags_model", "not_r_content",
-                 "defines_functions", "not_analysis", "docker_failed", "not_downloaded")
-n_rc_excl <- function(outcome) sum(rc_all$outcome %in% outcome)
-n_rc_source <- n_rc_excl(c("run_by_source", "run_by_import"))
-n_rc_defines <- n_rc_excl("defines_functions")
-n_rc_jags <- n_rc_excl("jags_model")
-n_rc_not_analysis <- n_rc_excl("not_analysis")
-n_rc_not_r_content <- n_rc_excl("not_r_content")
-n_rc_not_downloaded <- n_rc_excl("not_downloaded")
-
-rc_runs <- rc_all[!rc_all$outcome %in% rc_excluded & !is.na(rc_all$outcome), ]
-
-n_rc_papers <- sum(rc_st$repro_code_n > 0, na.rm = TRUE)
-n_rc_not_run <- n_mc_code - n_rc_papers
-n_rc_scripts <- nrow(rc_runs)
-n_rc_ok <- sum(rc_runs$outcome == "ran_ok")
-rc_ok_by_paper <- split(rc_runs$outcome == "ran_ok", rc_runs$paper_id)
-n_rc_all_ok <- sum(vapply(rc_ok_by_paper, all, logical(1)))
-n_rc_none_ok <- sum(!vapply(rc_ok_by_paper, any, logical(1)))
-n_rc_some_ok <- length(rc_ok_by_paper) - n_rc_all_ok - n_rc_none_ok
-
-rc_ext <- tolower(tools::file_ext(rc_runs$file_name))
-rc_is_python <- rc_ext %in% c("py", "ipynb")
-n_rc_python <- sum(rc_is_python)
-n_rc_python_ok <- sum(rc_is_python & rc_runs$outcome == "ran_ok")
-n_rc_r <- n_rc_scripts - n_rc_python
-n_rc_r_ok <- n_rc_ok - n_rc_python_ok
-
-# The module's own one-word reason for each counted script that did not run through.
-rc_reason <- rc_runs$reason
-rc_reason[rc_runs$outcome == "ran_ok"] <- NA_character_
-rc_message <- paste(rc_runs$error, rc_runs$stderr)
-stopifnot(identical(is.na(rc_reason), rc_runs$outcome == "ran_ok"))
-n_rc_failed <- sum(!is.na(rc_reason))
-n_rc_failed_papers <- length(unique(rc_runs$paper_id[!is.na(rc_reason)]))
-n_reason <- function(reason) sum(rc_reason %in% reason)
-n_reason_papers <- function(reason) length(unique(rc_runs$paper_id[rc_reason %in% reason]))
-n_rc_outcome <- function(outcome) sum(rc_runs$outcome == outcome)
-n_rc_others_software <- sum(rc_reason %in% "package" & grepl("No module named '(cvat|motioneye)", rc_message))
-
-n_rc_declared <- nrow(rc_install)
-n_rc_not_installed <- sum(!rc_install$installed)
-n_rc_not_installed_papers <- length(unique(rc_install$paper_id[!rc_install$installed]))
-n_rc_not_on_cran <- sum(rc_install$category[!rc_install$installed] %in% "cran_unavailable")
-rc_failed_packages <- sort(table(rc_install$package[!rc_install$installed]), decreasing = TRUE)
-n_rc_change <- function(type) sum(rc_changes$change_type == type)
-n_rc_changed_papers <- length(unique(rc_changes$paper_id))
-
-rc_match <- reproducibility_detail$all_matches
-rc_match_papers <- reproducibility_detail$by_paper_match
-n_rc_stats <- nrow(rc_match)
-n_rc_stats_found <- sum(rc_match$found %in% TRUE)
-n_rc_stat_papers <- nrow(rc_match_papers)
-n_rc_stat_all <- sum(rc_match_papers$prop_matched == 1)
-n_rc_stat_none <- sum(rc_match_papers$prop_matched == 0)
-n_rc_stat_some <- n_rc_stat_papers - n_rc_stat_all - n_rc_stat_none
-
-# Cooper et al.'s rating of completeness for the papers whose code was run.
-rc_cooper <- read.csv("data/cooper_coded_data.csv")
-rc_papers <- read.csv("data/papers_data.csv", colClasses = "character")
-rc_cooper$article_id <- rc_papers$article_id[match(as.character(rc_cooper$paper_number), rc_papers$paper_number)]
-rc_complete <- rc_cooper$article_id[rc_cooper$data_completeness %in% "Complete"]
-rc_missing <- rc_st$paper_id[rc_st$repro_missing_inputs > 0 & !is.na(rc_st$repro_missing_inputs)]
-rc_complete_run <- intersect(rc_complete, names(rc_ok_by_paper))
-n_rc_complete <- length(rc_complete_run)
-n_rc_complete_missing <- length(intersect(rc_complete_run, rc_missing))
-n_rc_complete_any_ok <- sum(vapply(rc_ok_by_paper[rc_complete_run], any, logical(1)))
-n_rc_complete_all_ok <- sum(vapply(rc_ok_by_paper[rc_complete_run], all, logical(1)))
-n_rc_missing_all <- length(intersect(names(rc_ok_by_paper), rc_missing))
-
-rc_reason_rows <- c("file", "package", "other", "undefined", "time", "interactive",
-                    "syntax", "environment", "download", "internet")
-rc_reason_table <- data.frame(
-  Reason = c("A file the script needs was not found", "A package could not be installed or loaded",
-             "Another error while the code ran", "An object or function is not defined",
-             "The time limit was reached", "The script asks a person to choose a file",
-             "The file is not valid code in its language", "The software environment differs",
-             "A download the script needs was too large", "The script needs the internet"),
-  Scripts = vapply(rc_reason_rows, n_reason, 0L),
-  `% of failed scripts` = sprintf("%.1f", 100 * vapply(rc_reason_rows, n_reason, 0L) / n_rc_failed),
-  Papers = vapply(rc_reason_rows, n_reason_papers, 0L),
-  check.names = FALSE
-)
-stopifnot(sum(rc_reason_table$Scripts) == n_rc_failed - n_reason("no_message"))
+source("code/reproducibility_counts.R")
 ```
 
 Cooper et al. asked coders to judge how complete the archived data were, but note that "Completeness is difficult to assess thoroughly without reproducing the analyses in the paper, but this requires time and advanced computational skills" [@cooper2026, p. 1957]. They report that 69% (n = 1087) of datasets were scored as complete, and that "this should be considered an informed judgement about completeness, not verified reproducibility" [@cooper2026, p. 1960]. Metacheck has code that attempts to automatically reproduce results from data and code in R and Python. We ran the code in a Docker environment that contained the most common pre-installed packages, although this might lead to a difference between the code used to create the script, and the code used to run the script. We set a runtime for each script of at most 3000 seconds, and noted when scripts failed because they needed a longer time to run (e.g., lengthy simulations). When a script reads the output of another script, the module tries to run them in the required order. It changes the code to remove obstacles that are unrelated to the analysis: in `r n_rc_changed_papers` papers it rewrote `r n_rc_change("path_rewrite")` file paths so that they pointed to the downloaded files, removed `r n_rc_change("setwd_removed")` `setwd()` calls, added `r n_rc_change("library_injected")` calls that load a package, and replaced `r n_rc_change("font_replaced")` references to fonts. The results below therefore describe what happens after these repairs, and code run exactly as shared would fail more often. Finally, the module extracts the statistical results printed by the code, and looks for the statistics reported in the paper among them. This is a feature still under development, but it attempts to indicate which statistical tests can be found in the results of the reproduced code.
 
-Of the `r n_mc_code` papers in which Metacheck found code, the module tried to run the code of `r n_rc_papers`. The other `r n_rc_not_run` papers only have MATLAB or Mplus code, which the reproducibility check module can't run, as this is proprietary software. Not every code file in these papers is a standalone analysis that the module runs on its own, so these files are counted and reported separately rather than among the scripts that were run: `r n_rc_source` files are run by another script through `source()` or an import and have no result of their own, `r n_rc_defines` only define functions, `r n_rc_jags` are JAGS or BUGS model files, `r n_rc_not_r_content` are not code in a language the module runs, and `r n_rc_not_downloaded` could not be tried because a data file they read was larger than the 1,000 MB per-file limit, and the datafile was not downloaded. Across these `r n_rc_papers` papers, `r n_rc_scripts` scripts were run as analyses, of which `r n_rc_ok` (`r pct1(n_rc_ok / n_rc_scripts)`%) ran without an error (`r n_rc_r_ok` of the `r n_rc_r` R scripts (`r pct1(n_rc_r_ok / n_rc_r)`%) and `r n_rc_python_ok` of the `r n_rc_python` Python scripts (`r pct1(n_rc_python_ok / n_rc_python)`%)). At the level of papers, all scripts ran without an error in only `r n_rc_all_ok` papers (`r pct1(n_rc_all_ok / n_rc_papers)`%), some files ran in `r n_rc_some_ok` (`r pct1(n_rc_some_ok / n_rc_papers)`%), and none of the files ran in `r n_rc_none_ok` (`r pct1(n_rc_none_ok / n_rc_papers)`%).
+Of the `r n_mc_code` papers in which Metacheck found code, the module tried to run the code of `r n_rc_papers`. The other `r n_rc_not_run` papers only have MATLAB or Mplus code, which the reproducibility check module can't run, as this is proprietary software. Not every code file in these papers is a standalone analysis that the module runs on its own, so these files are counted and reported separately rather than among the scripts that were run: `r n_rc_source` files are run by another script through `source()` or an import and have no result of their own, `r n_rc_defines` only define functions, `r n_rc_jags` are JAGS or BUGS model files, `r n_rc_not_r_content` are not code in a language the module runs, and `r n_rc_not_downloaded` could not be tried because a data file they read was larger than the 1,000 MB per-file limit, and the datafile was not downloaded. Across these `r n_rc_papers` papers, `r n_rc_scripts` scripts were run as analyses, of which `r npcnt(n_rc_ok, n_rc_scripts)` ran without an error (`r n_rc_r_ok` of the `r n_rc_r` R scripts (`r pct1(n_rc_r_ok / n_rc_r)`) and `r n_rc_python_ok` of the `r n_rc_python` Python scripts (`r pct1(n_rc_python_ok / n_rc_python)`)). At the level of papers, all scripts ran without an error in only `r n_rc_all_ok` papers (`r pct1(n_rc_all_ok / n_rc_papers)`), some files ran in `r n_rc_some_ok` (`r pct1(n_rc_some_ok / n_rc_papers)`), and none of the files ran in `r n_rc_none_ok` (`r pct1(n_rc_none_ok / n_rc_papers)`).
 
 @tbl-repro-reasons sorts the `r n_rc_failed` scripts that failed, in `r n_rc_failed_papers` papers, by the one-word reason the module saved for each script. A paper can appear under several reasons. The module did not start `r n_rc_outcome("dependency_unavailable")` scripts because a package they need could not be installed, and a further `r n_rc_outcome("not_parsed")` files could not be read as code. The other scripts started and then stopped: `r n_rc_outcome("errored")` with an error, `r n_rc_outcome("timed_out") + n_rc_outcome("skipped_time_limit")` on the time limit, `r n_rc_outcome("needs_a_person")` because the code asks a person to choose a file, `r n_rc_outcome("out_of_memory")` on the memory limit, `r n_rc_outcome("download_too_large")` because a download they need was too large, and `r n_rc_outcome("needs_internet")` because they need the internet.
 
@@ -1024,9 +359,9 @@ Of the `r n_mc_code` papers in which Metacheck found code, the module tried to r
 knitr::kable(rc_reason_table, format = "pipe", align = c("l", "r", "r", "r"), row.names = FALSE)
 ```
 
-The most frequent reason is a file the script needs. This can mean that the authors did not archive it (sometimes because the data could not be shared for privacy reasons), that it is produced by a step that is not archived, or that Metacheck could not match the name in the code to a file in the repository (as people sometimes rename files they share after they have run the analyses). In a further `r n_reason("interactive")` scripts the code asks a person to select a file, for example with `file.choose()`, so it cannot run unattended. The next most frequent reason, after `r n_reason("other")` scripts that stopped with some other error while the code ran, is a package. The papers declared `r n_rc_declared` packages in total, and `r n_rc_not_installed` of these (`r pct1(n_rc_not_installed / n_rc_declared)`%) could not be installed, in `r n_rc_not_installed_papers` papers. In `r n_rc_not_on_cran` cases the package was not available on CRAN for the version of R the module used. The packages that failed most often are `r names(rc_failed_packages)[1]` (`r rc_failed_packages[[1]]` papers), `r names(rc_failed_packages)[2]` (`r rc_failed_packages[[2]]`) and `r names(rc_failed_packages)[3]` (`r rc_failed_packages[[3]]`). Some failures do not concern the authors' analysis at all, because Metacheck treats all files in a linked repository as the paper's own.
+The most frequent reason is a file the script needs. This can mean that the authors did not archive it (sometimes because the data could not be shared for privacy reasons), that it is produced by a step that is not archived, or that Metacheck could not match the name in the code to a file in the repository (as people sometimes rename files they share after they have run the analyses). In a further `r n_reason("interactive")` scripts the code asks a person to select a file, for example with `file.choose()`, so it cannot run unattended. The next most frequent reason, after `r n_reason("other")` scripts that stopped with some other error while the code ran, is a package. The papers declared `r n_rc_declared` packages in total, and `r n_rc_not_installed` of these (`r pct1(n_rc_not_installed / n_rc_declared)`) could not be installed, in `r n_rc_not_installed_papers` papers. In `r n_rc_not_on_cran` cases the package was not available on CRAN for the version of R the module used. The packages that failed most often are `r names(rc_failed_packages)[1]` (`r rc_failed_packages[[1]]` papers), `r names(rc_failed_packages)[2]` (`r rc_failed_packages[[2]]`) and `r names(rc_failed_packages)[3]` (`r rc_failed_packages[[3]]`). Some failures do not concern the authors' analysis at all, because Metacheck treats all files in a linked repository as the paper's own.
 
-These results can be compared with the coders' judgement of completeness. Among the `r n_rc_complete` papers whose code was run and whose data the coders rated as complete, the module could not find a file a script needs in `r n_rc_complete_missing` papers (`r pct1(n_rc_complete_missing / n_rc_complete)`%), compared with `r n_rc_missing_all` of all `r n_rc_papers` papers (`r pct1(n_rc_missing_all / n_rc_papers)`%). At least one script ran without an error in `r n_rc_complete_any_ok` of these papers (`r pct1(n_rc_complete_any_ok / n_rc_complete)`%), and all scripts did in `r n_rc_complete_all_ok` (`r pct1(n_rc_complete_all_ok / n_rc_complete)`%). The completeness ration is not a valid indication of the computational reproducibility of a paper, Cooper et al. already caution.
+These results can be compared with the coders' judgement of completeness. Among the `r n_rc_complete` papers whose code was run and whose data the coders rated as complete, the module could not find a file a script needs in `r n_rc_complete_missing` papers (`r pct1(n_rc_complete_missing / n_rc_complete)`), compared with `r n_rc_missing_all` of all `r n_rc_papers` papers (`r pct1(n_rc_missing_all / n_rc_papers)`). At least one script ran without an error in `r n_rc_complete_any_ok` of these papers (`r pct1(n_rc_complete_any_ok / n_rc_complete)`), and all scripts did in `r npcnt(n_rc_complete_all_ok, n_rc_complete)`. The completeness ratio is not a valid indication of the computational reproducibility of a paper, Cooper et al. already caution.
 
 This automated computational reproducibility check indicates that creating computationally reproducible data and code is difficult. Running a tool such as Metacheck on a repository before depositing data and code would perhaps have warned the researchers who failed to share all files that some scripts or files were missing, that objects or functions were not defined, or that there were other errors in the code. To prevent problems with packages or dependencies that are no longer available, the best solution is to create a Docker capsule which stores all required software, data, and code to reproduce the analyses. This is the only way to guarantee that scripts can be run years from now. Better coding practices would prevent researchers from creating code that requires human input, or where file paths are not set correctly. Finally, we could perhaps have increased the percentage of successful reproductions by increasing the run-time, and the file size of downloaded files. However, some limits should be set, and ideally scripts are computationally reproducible without downloading very large files, or running code for hours. Although the computational reproducibility rates might have been higher if a human had attempted to reproduce the results, the human coder would - for example - need expertise in python and R, the knowledge how to re-organize repositories, resolve minor coding errors, know which undefined libraries to install, and be able to figure out the order in which files should be run. Most researchers have not received training in computational reproducibility, and our results show there is a lot to gain. Automated checks such as those provided by Metacheck can reduce common errors, but real long term computational reproducibility might require alternative solutions than just sharing data and code, such as sharing all files in a container that guarantees computational reproducibility. \[We should do this ourselves and link to it\]
 
@@ -1059,11 +394,11 @@ n_cc_rated <- sum(!is.na(cc_rating))
 cc_rating_median <- median(cc_rating, na.rm = TRUE)
 ```
 
-Cooper et al.'s coders rated how well the code was annotated, on a scale from 1 (not annotated at all) to 10 (thorough annotation throughout) [@cooper2026, p. 1957]. For the `r n_cc_rated` papers they rated, the median score was `r cc_rating_median` [@cooper2026, p. 1960], although the authors note that this variable was less consistent among coders and should be interpreted with care [@cooper2026, p. 1958]. How good code annotation is cannot be classified automatically: whether a comment explains a decision that is not obvious from the code, or only repeats what the code does, requires a judgement that only human coders can make. Metacheck can check whether code is annotated at all. It counts the comment lines in every code file it can read, and warns when a file has no comments. Of the `r n_cc_files` code files in `r n_cc_papers` papers that Metacheck could check, `r n_cc_zero` (`r pct1(n_cc_zero / n_cc_files)`%), in `r n_cc_zero_papers` papers, had no comments. Of these, `r n_cc_zero_py` were Python files, `r n_cc_zero_py_docstring` of which were documented with a docstring instead of comments, which Metacheck reports separately. The median code file had `r cc_comment_median` comment lines (interquartile range `r cc_comment_q[1]` to `r cc_comment_q[2]`), against `r cc_code_median` lines of code. Metacheck can not evaluate annotation quality, but it can warn when code is not annotated at
+Cooper et al.'s coders rated how well the code was annotated, on a scale from 1 (not annotated at all) to 10 (thorough annotation throughout) [@cooper2026, p. 1957]. For the `r n_cc_rated` papers they rated, the median score was `r cc_rating_median` [@cooper2026, p. 1960], although the authors note that this variable was less consistent among coders and should be interpreted with care [@cooper2026, p. 1958]. How good code annotation is cannot be classified automatically: whether a comment explains a decision that is not obvious from the code, or only repeats what the code does, requires a judgement that only human coders can make. Metacheck can check whether code is annotated at all. It counts the comment lines in every code file it can read, and warns when a file has no comments. Of the `r n_cc_files` code files in `r n_cc_papers` papers that Metacheck could check, `r npcnt(n_cc_zero,n_cc_files)`, in `r n_cc_zero_papers` papers, had no comments. Of these, `r n_cc_zero_py` were Python files, `r n_cc_zero_py_docstring` of which were documented with a docstring instead of comments, which Metacheck reports separately. The median code file had `r cc_comment_median` comment lines (interquartile range `r cc_comment_q[1]` to `r cc_comment_q[2]`), against `r cc_code_median` lines of code. Metacheck can not evaluate annotation quality, but it can warn when code is not annotated at
 
 ## 8. Are the data/code citable?
 
-Cooper et al. report that "of the 1690 papers with archived data, 91% (n = 1543) had a DOI and 85% (n = 1438) had a licence", with CC0, the licence used by Dryad, used most often (n = 1076), and that "of the 577 papers with archived code, 79% (n = 457) had a DOI and 74% (n = 428) had a licence", with CC BY (n = 122), the licence Zenodo uses by default, and CC0 (n = 104) used most often [@cooper2026, p. 1960]. Metacheck reads the licence from the metadata of each repository it can access, and we compared whether the data had a licence. For the `r results$data_license$n_both_coded` papers where both the manual coders and Metacheck gave an answer, they agreed for `r results$data_license$n_agree` papers (`r pct1(results$data_license$pct_agree/100)`%) and disagreed for `r results$data_license$n_disagree` (@tbl-summary). In `r results$data_license$fp` of these disagreements Metacheck found a licence that the coders did not record, and the review of each disagreement judged the automatic coding correct in `r vt(verdict_tallies$data_license, "METACHECK_RIGHT")` of the `r results$data_license$n_disagree`. We did not compare DOIs or the licences of code.
+Cooper et al. report that "of the 1690 papers with archived data, 91% (n = 1543) had a DOI and 85% (n = 1438) had a licence", with CC0, the licence used by Dryad, used most often (n = 1076), and that "of the 577 papers with archived code, 79% (n = 457) had a DOI and 74% (n = 428) had a licence", with CC BY (n = 122), the licence Zenodo uses by default, and CC0 (n = 104) used most often [@cooper2026, p. 1960]. Metacheck reads the licence from the metadata of each repository it can access, and we compared whether the data had a licence. For the `r results$data_license$n_both_coded` papers where both the manual coders and Metacheck gave an answer, they agreed for `r results$data_license$n_agree` papers (`r pct1(results$data_license$pct_agree/100)`) and disagreed for `r results$data_license$n_disagree` (@tbl-summary). In `r results$data_license$fp` of these disagreements Metacheck found a licence that the coders did not record, and the review of each disagreement judged the automatic coding correct in `r vt(verdict_tallies$data_license, "METACHECK_RIGHT")` of the `r results$data_license$n_disagree`. We did not compare DOIs or the licences of code.
 
 # Discussion
 
